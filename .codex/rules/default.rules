@@ -1,0 +1,75 @@
+# Block destructive repository recovery commands outside the sandbox.
+prefix_rule(
+    pattern = ["git", "reset", "--hard"],
+    decision = "forbidden",
+    match = [
+        "git reset --hard",
+        "git reset --hard HEAD",
+    ],
+    not_match = [
+        "git reset --soft HEAD~1",
+    ],
+)
+
+# Block checkout-based file reverts outside the sandbox.
+prefix_rule(
+    pattern = ["git", "checkout", "--"],
+    decision = "forbidden",
+    match = [
+        "git checkout -- PLAN.md",
+    ],
+    not_match = [
+        "git checkout codex/my-branch",
+    ],
+)
+
+# Block aggressive worktree cleanup outside the sandbox.
+prefix_rule(
+    pattern = ["git", "clean"],
+    decision = "prompt",
+    match = [
+        "git clean -fd",
+        "git clean -xfd",
+    ],
+    not_match = [
+        "git clone https://github.com/openai/symphony .",
+    ],
+)
+
+# Block raw delete commands outside the sandbox.
+prefix_rule(
+    pattern = ["rm"],
+    decision = "forbidden",
+    match = [
+        "rm -rf /tmp/example",
+        "rm PLAN.md",
+    ],
+    not_match = [
+        "rg PLAN.md",
+    ],
+)
+
+# Require confirmation before rewriting remote branch history.
+prefix_rule(
+    pattern = ["git", "push", "--force"],
+    decision = "prompt",
+    match = [
+        "git push --force origin codex/test",
+    ],
+    not_match = [
+        "git push origin codex/test",
+    ],
+)
+
+# Require confirmation before creating or updating pull requests outside the sandbox.
+prefix_rule(
+    pattern = ["gh", "pr", ["create", "edit"]],
+    decision = "prompt",
+    match = [
+        "gh pr create --title test --body draft",
+        "gh pr edit 123 --title updated",
+    ],
+    not_match = [
+        "gh pr view 123",
+    ],
+)
