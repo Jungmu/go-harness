@@ -21,7 +21,7 @@ Use this skill when the change touches scheduler semantics, worker lifecycle, or
 Read these first. Resolve repository documents from the working repository, not relative to this skill folder:
 
 - the `PLAN.md` file at the current repository root
-- the `SPEC.md` file at the parent workspace root
+- the `SPEC.md` file at the current repository root
 - the orchestrator package
 - the runner package
 - status projection code and tests when touched

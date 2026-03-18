@@ -1,6 +1,6 @@
 # Go Harness
 
-This repository is a Go implementation plan for a Symphony-style harness. Follow `../SPEC.md` first, then `PLAN.md`. If code changes alter the intended contract, update the relevant docs in the same change.
+This repository is a Go implementation plan for a Symphony-style harness. Follow `SPEC.md` first, then `PLAN.md`. If code changes alter the intended contract, update the relevant docs in the same change.
 
 ## Working Agreements
 

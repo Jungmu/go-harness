@@ -1,0 +1,14 @@
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Local runtime artifacts
+transcript.log
+
+# Go build and test outputs
+bin/
+*.test
+coverage.out
+cover.out
+.coverprofile

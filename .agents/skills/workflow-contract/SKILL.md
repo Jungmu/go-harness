@@ -22,7 +22,7 @@ Use this skill when the change affects the repository-owned workflow contract ra
 Read these first. Resolve them from the working repository, not relative to this skill folder:
 
 - the `PLAN.md` file at the current repository root
-- the `SPEC.md` file at the parent workspace root
+- the `SPEC.md` file at the current repository root
 - the `WORKFLOW.md` file at the current repository root, when it exists
 - the `docs/workflow-contract.md` file under the current repository root, when it exists
 
