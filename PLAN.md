@@ -666,11 +666,13 @@ workspace:
 hooks:
   timeout_ms: 60000
   after_create: |
-    git -C "$HARNESS_SOURCE_REPO" worktree add --detach "$PWD" main
+    git -C "$HARNESS_SOURCE_REPO" worktree prune
+    git -C "$HARNESS_SOURCE_REPO" worktree add --force --detach "$PWD" main
   before_run: |
     git status --short
   before_remove: |
     git -C "$HARNESS_SOURCE_REPO" worktree remove --force "$PWD"
+    git -C "$HARNESS_SOURCE_REPO" worktree prune
 agent:
   max_concurrent_agents: 10
   max_turns: 20

@@ -31,12 +31,14 @@ workspace:
 hooks:
   after_create: |
     test -n "$HARNESS_SOURCE_REPO" || { echo "HARNESS_SOURCE_REPO is required"; exit 1; }
-    git -C "$HARNESS_SOURCE_REPO" worktree add --detach "$PWD" main
+    git -C "$HARNESS_SOURCE_REPO" worktree prune
+    git -C "$HARNESS_SOURCE_REPO" worktree add --force --detach "$PWD" main
   before_run: git fetch --all --prune
   after_run: git status --short
   before_remove: |
     test -n "$HARNESS_SOURCE_REPO" || exit 0
     git -C "$HARNESS_SOURCE_REPO" worktree remove --force "$PWD"
+    git -C "$HARNESS_SOURCE_REPO" worktree prune
   timeout_ms: 60000
 
 agent:

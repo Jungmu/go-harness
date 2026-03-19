@@ -124,6 +124,7 @@ Notes:
 - `workspace.root` supports `~` and environment expansion
 - for a real repository, prefer `git worktree add`/`git worktree remove` in hooks instead of cloning into each issue workspace
 - workspace hooks automatically receive `HARNESS_SOURCE_REPO`, `HARNESS_WORKFLOW_PATH`, and `HARNESS_WORKFLOW_DIR`; the examples use `HARNESS_SOURCE_REPO` for `git worktree`
+- when using `git worktree` in hooks, prune stale registrations before `worktree add` and after `worktree remove` so retries can recover from interrupted cleanup
 - keep runtime caches and scratch output under `.harness/` inside the issue workspace so PR handoff can ignore them safely
 - target repositories should ignore `.harness/` in git, and can also ignore legacy `.cache/` if older workflow templates still write there
 - `logging.level` accepts `debug`, `info`, `warn`, or `error`
