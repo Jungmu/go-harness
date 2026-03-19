@@ -114,7 +114,8 @@ type ServerConfig struct {
 }
 
 type LoggingConfig struct {
-	Level string
+	Level          string
+	CapturePrompts bool
 }
 
 type EnvironmentConfig struct {
@@ -373,6 +374,13 @@ func applyConfig(cfg *RuntimeConfig, raw map[string]any, env envResolver) error 
 
 	if loggingMap := mapValue(raw, "logging"); loggingMap != nil {
 		cfg.Logging.Level = stringValue(loggingMap, "level", cfg.Logging.Level)
+		if rawCapturePrompts, ok := loggingMap["capture_prompts"]; ok {
+			capturePrompts, ok := rawCapturePrompts.(bool)
+			if !ok {
+				return &ValidationError{Field: "logging.capture_prompts", Message: "must be a boolean"}
+			}
+			cfg.Logging.CapturePrompts = capturePrompts
+		}
 	}
 
 	if serverMap := mapValue(raw, "server"); serverMap != nil {
@@ -591,7 +599,8 @@ func (s *Store) loadConfig(path, envPath string) (RuntimeConfig, time.Time, file
 			StallTimeout:      defaultStallTimeout,
 		},
 		Logging: LoggingConfig{
-			Level: defaultLogLevel,
+			Level:          defaultLogLevel,
+			CapturePrompts: false,
 		},
 	}
 

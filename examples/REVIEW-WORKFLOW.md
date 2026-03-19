@@ -41,6 +41,7 @@ codex:
 
 logging:
   level: info
+  capture_prompts: false
 ---
 
 You are reviewing the current workspace state for {{ issue.identifier }}.

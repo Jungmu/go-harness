@@ -64,5 +64,5 @@ type dynamicRunner struct {
 
 func (d *dynamicRunner) RunAttempt(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
 	cfg := d.store.Current()
-	return codex.NewRunner(cfg.Codex, d.logger).RunAttempt(ctx, issue, workspace, prompt, attempt, onEvent, continueFn)
+	return codex.NewRunner(cfg.Codex, cfg.Logging, d.logger).RunAttempt(ctx, issue, workspace, prompt, attempt, onEvent, continueFn)
 }

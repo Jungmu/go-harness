@@ -55,8 +55,9 @@ type RunResult struct {
 }
 
 type Runner struct {
-	cfg    config.CodexConfig
-	logger *slog.Logger
+	cfg     config.CodexConfig
+	logging config.LoggingConfig
+	logger  *slog.Logger
 }
 
 type streamLine struct {
@@ -66,26 +67,28 @@ type streamLine struct {
 }
 
 type appSession struct {
+	stdin         io.Writer
 	stdinCloser   io.Closer
 	cancel        context.CancelFunc
-	encoder       *json.Encoder
 	lines         chan streamLine
 	waitCh        chan error
 	threadID      string
 	workspacePath string
 	appServerPID  int
 	nextRequestID int
+	recorder      *transcriptRecorder
 }
 
-func NewRunner(cfg config.CodexConfig, logger *slog.Logger) *Runner {
-	return &Runner{cfg: cfg, logger: logger}
+func NewRunner(cfg config.CodexConfig, logging config.LoggingConfig, logger *slog.Logger) *Runner {
+	return &Runner{cfg: cfg, logging: logging, logger: logger}
 }
 
 func (r *Runner) RunAttempt(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(Event), continueFn ContinueFunc) (RunResult, error) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	session, err := r.startSession(runCtx, workspace.Path, onEvent)
+	recorder := newTranscriptRecorder(r.logging.CapturePrompts, issue, workspace, attempt, r.logger)
+	session, err := r.startSession(runCtx, workspace, recorder, onEvent)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -124,8 +127,9 @@ func (r *Runner) RunAttempt(ctx context.Context, issue domain.Issue, workspace d
 	}
 }
 
-func (r *Runner) startSession(ctx context.Context, workspacePath string, onEvent func(Event)) (*appSession, error) {
+func (r *Runner) startSession(ctx context.Context, workspace domain.Workspace, recorder *transcriptRecorder, onEvent func(Event)) (*appSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
+	workspacePath := workspace.Path
 
 	cmd := exec.CommandContext(sessionCtx, "bash", "-lc", r.cfg.Command)
 	cmd.Dir = workspacePath
@@ -166,8 +170,19 @@ func (r *Runner) startSession(ctx context.Context, workspacePath string, onEvent
 		waitCh <- cmd.Wait()
 	}()
 
-	encoder := json.NewEncoder(stdin)
-	if err := encodeMessage(encoder, map[string]any{
+	session := &appSession{
+		stdin:         stdin,
+		stdinCloser:   stdin,
+		cancel:        cancel,
+		lines:         lines,
+		waitCh:        waitCh,
+		workspacePath: workspacePath,
+		appServerPID:  processPID(cmd),
+		nextRequestID: turnStartID,
+		recorder:      recorder,
+	}
+
+	if err := session.send(map[string]any{
 		"id":     initializeID,
 		"method": "initialize",
 		"params": map[string]any{
@@ -178,20 +193,20 @@ func (r *Runner) startSession(ctx context.Context, workspacePath string, onEvent
 				"version": "0.1.0",
 			},
 		},
-	}); err != nil {
+	}, session.trace(""), 0); err != nil {
 		cancel()
 		return nil, err
 	}
 
-	if _, err := r.awaitResponse(sessionCtx, lines, waitCh, initializeID, onEvent); err != nil {
+	if _, err := r.awaitResponse(sessionCtx, session, initializeID, 0, onEvent); err != nil {
 		cancel()
 		return nil, err
 	}
-	if err := encodeMessage(encoder, map[string]any{"method": "initialized", "params": map[string]any{}}); err != nil {
+	if err := session.send(map[string]any{"method": "initialized", "params": map[string]any{}}, session.trace(""), 0); err != nil {
 		cancel()
 		return nil, err
 	}
-	if err := encodeMessage(encoder, map[string]any{
+	if err := session.send(map[string]any{
 		"id":     threadStartID,
 		"method": "thread/start",
 		"params": map[string]any{
@@ -199,12 +214,12 @@ func (r *Runner) startSession(ctx context.Context, workspacePath string, onEvent
 			"sandbox":        protocolThreadSandbox(r.cfg.ThreadSandbox),
 			"cwd":            workspacePath,
 		},
-	}); err != nil {
+	}, session.trace(""), 0); err != nil {
 		cancel()
 		return nil, err
 	}
 
-	threadID, err := r.awaitStarted(sessionCtx, lines, waitCh, threadStartID, "thread/started", "thread", onEvent)
+	threadID, err := r.awaitStarted(sessionCtx, session, threadStartID, "thread/started", "thread", 0, onEvent)
 	if threadID == "" {
 		cancel()
 		if err == nil {
@@ -212,25 +227,17 @@ func (r *Runner) startSession(ctx context.Context, workspacePath string, onEvent
 		}
 		return nil, err
 	}
+	session.threadID = threadID
 
-	return &appSession{
-		stdinCloser:   stdin,
-		cancel:        cancel,
-		encoder:       encoder,
-		lines:         lines,
-		waitCh:        waitCh,
-		threadID:      threadID,
-		workspacePath: workspacePath,
-		appServerPID:  processPID(cmd),
-		nextRequestID: turnStartID,
-	}, nil
+	return session, nil
 }
 
 func (r *Runner) runTurn(ctx context.Context, session *appSession, issue domain.Issue, prompt string, turnCount int, result *RunResult, onEvent func(Event)) (domain.LiveSession, error) {
 	requestID := session.nextRequestID
 	session.nextRequestID++
 
-	if err := encodeMessage(session.encoder, map[string]any{
+	session.recorder.RecordPrompt(prompt, session.trace(""), turnCount)
+	if err := session.send(map[string]any{
 		"id":     requestID,
 		"method": "turn/start",
 		"params": map[string]any{
@@ -243,11 +250,11 @@ func (r *Runner) runTurn(ctx context.Context, session *appSession, issue domain.
 			"approvalPolicy": r.cfg.ApprovalPolicy,
 			"sandboxPolicy":  protocolSandboxPolicy(r.cfg.TurnSandboxPolicy),
 		},
-	}); err != nil {
+	}, session.trace(""), turnCount); err != nil {
 		return domain.LiveSession{}, err
 	}
 
-	turnID, err := r.awaitStarted(ctx, session.lines, session.waitCh, requestID, "turn/started", "turn", onEvent)
+	turnID, err := r.awaitStarted(ctx, session, requestID, "turn/started", "turn", turnCount, onEvent)
 	if turnID == "" {
 		if err == nil {
 			err = fmt.Errorf("turn/start response missing turn id")
@@ -309,6 +316,7 @@ func (r *Runner) runTurn(ctx context.Context, session *appSession, issue domain.
 			}
 
 			resetTimer(stallTimer, r.cfg.StallTimeout)
+			session.recorder.RecordIO("recv", line.source, line.text, liveSession, turnCount)
 
 			if line.source == "stderr" {
 				emit(onEvent, Event{
@@ -359,7 +367,7 @@ func (r *Runner) runTurn(ctx context.Context, session *appSession, issue domain.
 					return domain.LiveSession{}, fmt.Errorf("turn_cancelled")
 				}
 
-				handled, err := r.handleProtocolMethod(session.encoder, payload, liveSession, turnCount, onEvent)
+				handled, err := r.handleProtocolMethod(session, payload, liveSession, turnCount, onEvent)
 				if err != nil {
 					return domain.LiveSession{}, err
 				}
@@ -373,7 +381,7 @@ func (r *Runner) runTurn(ctx context.Context, session *appSession, issue domain.
 	}
 }
 
-func (r *Runner) awaitResponse(ctx context.Context, lines <-chan streamLine, waitCh <-chan error, id int, onEvent func(Event)) (map[string]any, error) {
+func (r *Runner) awaitResponse(ctx context.Context, session *appSession, id, turnCount int, onEvent func(Event)) (map[string]any, error) {
 	timer := time.NewTimer(r.cfg.ReadTimeout)
 	defer timer.Stop()
 
@@ -383,7 +391,7 @@ func (r *Runner) awaitResponse(ctx context.Context, lines <-chan streamLine, wai
 			return nil, ctx.Err()
 		case <-timer.C:
 			return nil, fmt.Errorf("read_timeout waiting for response %d", id)
-		case err := <-waitCh:
+		case err := <-session.waitCh:
 			if err == nil {
 				return nil, fmt.Errorf("app_server_exited")
 			}
@@ -391,13 +399,14 @@ func (r *Runner) awaitResponse(ctx context.Context, lines <-chan streamLine, wai
 				return nil, err
 			}
 			return nil, err
-		case line, ok := <-lines:
+		case line, ok := <-session.lines:
 			if !ok {
 				return nil, fmt.Errorf("stream closed while waiting for response %d", id)
 			}
 			if line.err != nil {
 				return nil, line.err
 			}
+			session.recorder.RecordIO("recv", line.source, line.text, session.trace(""), turnCount)
 			if line.source == "stderr" {
 				emit(onEvent, Event{Type: "stderr", At: time.Now().UTC(), Message: line.text, PayloadSummary: truncate(line.text, 200)})
 				continue
@@ -425,7 +434,7 @@ func (r *Runner) awaitResponse(ctx context.Context, lines <-chan streamLine, wai
 	}
 }
 
-func (r *Runner) awaitStarted(ctx context.Context, lines <-chan streamLine, waitCh <-chan error, responseID int, notificationMethod, entityKey string, onEvent func(Event)) (string, error) {
+func (r *Runner) awaitStarted(ctx context.Context, session *appSession, responseID int, notificationMethod, entityKey string, turnCount int, onEvent func(Event)) (string, error) {
 	timer := time.NewTimer(r.cfg.ReadTimeout)
 	defer timer.Stop()
 
@@ -445,7 +454,7 @@ func (r *Runner) awaitStarted(ctx context.Context, lines <-chan streamLine, wait
 				return "", fmt.Errorf("read_timeout waiting for %s; last_event=%s", notificationMethod, lastSummary)
 			}
 			return "", fmt.Errorf("read_timeout waiting for %s", notificationMethod)
-		case err := <-waitCh:
+		case err := <-session.waitCh:
 			if err == nil {
 				return "", fmt.Errorf("app_server_exited")
 			}
@@ -453,13 +462,14 @@ func (r *Runner) awaitStarted(ctx context.Context, lines <-chan streamLine, wait
 				return "", err
 			}
 			return "", err
-		case line, ok := <-lines:
+		case line, ok := <-session.lines:
 			if !ok {
 				return "", fmt.Errorf("stream closed while waiting for %s", notificationMethod)
 			}
 			if line.err != nil {
 				return "", line.err
 			}
+			session.recorder.RecordIO("recv", line.source, line.text, session.trace(""), turnCount)
 			if line.source == "stderr" {
 				lastSummary = truncate(line.text, 200)
 				emit(onEvent, Event{Type: "stderr", At: time.Now().UTC(), Message: line.text, PayloadSummary: truncate(line.text, 200)})
@@ -500,7 +510,7 @@ func (r *Runner) awaitStarted(ctx context.Context, lines <-chan streamLine, wait
 	}
 }
 
-func (r *Runner) handleProtocolMethod(encoder *json.Encoder, payload map[string]any, session domain.LiveSession, turnCount int, onEvent func(Event)) (bool, error) {
+func (r *Runner) handleProtocolMethod(app *appSession, payload map[string]any, session domain.LiveSession, turnCount int, onEvent func(Event)) (bool, error) {
 	method := stringField(payload, "method")
 
 	switch method {
@@ -508,10 +518,10 @@ func (r *Runner) handleProtocolMethod(encoder *json.Encoder, payload map[string]
 		if r.cfg.ApprovalPolicy != "never" {
 			return false, fmt.Errorf("approval_required")
 		}
-		if err := encodeMessage(encoder, map[string]any{
+		if err := app.send(map[string]any{
 			"id":     payload["id"],
 			"result": map[string]any{"decision": "acceptForSession"},
-		}); err != nil {
+		}, session, turnCount); err != nil {
 			return false, err
 		}
 		emit(onEvent, r.makeEvent("approval_auto_approved", payload, session, turnCount))
@@ -520,10 +530,10 @@ func (r *Runner) handleProtocolMethod(encoder *json.Encoder, payload map[string]
 		if r.cfg.ApprovalPolicy != "never" {
 			return false, fmt.Errorf("approval_required")
 		}
-		if err := encodeMessage(encoder, map[string]any{
+		if err := app.send(map[string]any{
 			"id":     payload["id"],
 			"result": map[string]any{"decision": "approved_for_session"},
-		}); err != nil {
+		}, session, turnCount); err != nil {
 			return false, err
 		}
 		emit(onEvent, r.makeEvent("approval_auto_approved", payload, session, turnCount))
@@ -535,7 +545,7 @@ func (r *Runner) handleProtocolMethod(encoder *json.Encoder, payload map[string]
 			toolName = stringField(params, "name")
 		}
 		output := fmt.Sprintf("unsupported dynamic tool call: %s", strings.TrimSpace(toolName))
-		if err := encodeMessage(encoder, map[string]any{
+		if err := app.send(map[string]any{
 			"id": payload["id"],
 			"result": map[string]any{
 				"success": false,
@@ -544,7 +554,7 @@ func (r *Runner) handleProtocolMethod(encoder *json.Encoder, payload map[string]
 					{"type": "inputText", "text": output},
 				},
 			},
-		}); err != nil {
+		}, session, turnCount); err != nil {
 			return false, err
 		}
 		emit(onEvent, r.makeEvent("unsupported_tool_call", payload, session, turnCount))
@@ -660,8 +670,33 @@ func pumpLines(source string, reader io.Reader, lines chan<- streamLine, wg *syn
 	}
 }
 
-func encodeMessage(encoder *json.Encoder, payload map[string]any) error {
-	return encoder.Encode(payload)
+func (s *appSession) trace(turnID string) domain.LiveSession {
+	session := domain.LiveSession{
+		ThreadID:     s.threadID,
+		TurnID:       turnID,
+		AppServerPID: s.appServerPID,
+	}
+	session.SessionID = domain.FormatSessionID(session.ThreadID, session.TurnID)
+	return session
+}
+
+func (s *appSession) send(payload map[string]any, session domain.LiveSession, turnCount int) error {
+	encoded, err := encodeMessage(payload)
+	if err != nil {
+		return err
+	}
+	s.recorder.RecordIO("send", "stdin", string(encoded), session, turnCount)
+	return writeEncodedMessage(s.stdin, encoded)
+}
+
+func encodeMessage(payload map[string]any) ([]byte, error) {
+	return json.Marshal(payload)
+}
+
+func writeEncodedMessage(writer io.Writer, payload []byte) error {
+	line := append(payload, '\n')
+	_, err := writer.Write(line)
+	return err
 }
 
 func decodeLine(line string) (map[string]any, error) {

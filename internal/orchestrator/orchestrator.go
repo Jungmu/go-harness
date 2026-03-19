@@ -1570,6 +1570,7 @@ func (o *Orchestrator) maybeReloadConfig(ticker *time.Ticker) {
 	o.logger.Info("workflow configuration reloaded",
 		slog.String("source_path", cfg.SourcePath),
 		slog.String("log_level", cfg.Logging.Level),
+		slog.Bool("capture_prompts", cfg.Logging.CapturePrompts),
 		slog.Duration("poll_interval", cfg.Polling.Interval),
 	)
 }

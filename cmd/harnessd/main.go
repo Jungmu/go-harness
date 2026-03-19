@@ -129,6 +129,7 @@ func runDaemon(args []string) int {
 	logger.Info("harness daemon started",
 		slog.String("workflow_path", cfg.SourcePath),
 		slog.String("log_level", cfg.Logging.Level),
+		slog.Bool("capture_prompts", cfg.Logging.CapturePrompts),
 		slog.Duration("poll_interval", cfg.Polling.Interval),
 		slog.String("workspace_root", cfg.Workspace.Root),
 		slog.Int("server_port", cfg.Server.Port),
@@ -233,6 +234,7 @@ func logStartupConfiguration(logger *slog.Logger, cfg config.RuntimeConfig) {
 
 	logger.Info("resolved startup environment",
 		slog.String("workflow_path", cfg.SourcePath),
+		slog.Bool("capture_prompts", cfg.Logging.CapturePrompts),
 		slog.String("dotenv_path", cfg.Environment.DotEnvPath),
 		slog.Bool("dotenv_present", cfg.Environment.DotEnvPresent),
 		slog.Any("environment_entries", entries),

@@ -40,6 +40,7 @@ The current Go harness implements:
   - performs `initialize -> initialized -> thread/start -> turn/start`
   - reuses the same `thread_id` for continuation turns in one run
   - streams events and usage totals
+  - optionally appends raw prompt and app-server transcript JSONL files under `workspace.root/.harness-prompts/`
 - `internal/orchestrator`
   - owns `claimed`, `running`, `retry`, `completed`
   - runs one-time startup cleanup for terminal workspaces

@@ -44,6 +44,7 @@ codex:
 
 logging:
   level: info
+  capture_prompts: false
 
 server:
   port: 8080

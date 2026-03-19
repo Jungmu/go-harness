@@ -44,7 +44,7 @@ func TestLogStartupConfigurationPrintsEnvironmentEntries(t *testing.T) {
 		SourcePath: "/repo/WORKFLOW.md",
 		Polling:    config.PollingConfig{Interval: 30 * time.Second},
 		Workspace:  config.WorkspaceConfig{Root: "/tmp/workspaces"},
-		Logging:    config.LoggingConfig{Level: "info"},
+		Logging:    config.LoggingConfig{Level: "info", CapturePrompts: true},
 		Server:     config.ServerConfig{Port: 8080},
 		Environment: config.EnvironmentConfig{
 			DotEnvPath:    "/repo/.env",
@@ -60,6 +60,7 @@ func TestLogStartupConfigurationPrintsEnvironmentEntries(t *testing.T) {
 	for _, expected := range []string{
 		`"msg":"resolved startup environment"`,
 		`"workflow_path":"/repo/WORKFLOW.md"`,
+		`"capture_prompts":true`,
 		`"dotenv_path":"/repo/.env"`,
 		`"dotenv_present":true`,
 		`"name":"LINEAR_API_KEY"`,

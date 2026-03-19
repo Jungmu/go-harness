@@ -56,6 +56,7 @@ Unknown keys are ignored.
 - `codex.read_timeout_ms = 5000`
 - `codex.stall_timeout_ms = 300000`
 - `logging.level = "info"`
+- `logging.capture_prompts = false`
 
 ## Value Resolution
 
@@ -64,6 +65,7 @@ Unknown keys are ignored.
 - `$VAR_NAME` resolves from the process environment first, then from `.env` in the executable directory.
 - `workspace.root` supports `~` expansion and `$VAR` expansion using the same environment lookup order.
 - `logging.level` accepts `debug`, `info`, `warn`, or `error`.
+- `logging.capture_prompts` accepts a boolean. Non-boolean values return `invalid logging.capture_prompts: must be a boolean`.
 - The shell command in `codex.command` is passed directly to `bash -lc`.
 - If no workflow path is passed and the current working directory has no `WORKFLOW.md`, the loader falls back to the executable directory before returning `missing_workflow_file`.
 
@@ -130,6 +132,7 @@ Unknown variables and filters return `workflow_template_render_error`.
 - The config layer also reloads when `.env` in the executable directory changes.
 - A valid change becomes the new active config immediately.
 - A `logging.level` change updates the process log verbosity on the next successful reload.
+- A `logging.capture_prompts` change applies to future run attempts after the next successful reload; already-running attempts keep their current capture mode.
 - A polling interval change resets the future tick cadence immediately.
 - An invalid reload keeps the last-known-good config active.
 - While the latest reload error is present, new dispatches and retry dispatches are blocked.
@@ -144,3 +147,6 @@ This is currently implemented as poll-time file change detection, not an `fsnoti
 - `GET /api/v1/issues/{identifier}` returns the per-issue in-memory history buffer for the identifier when present.
 - Running snapshots include `live_session.worker` so operators can distinguish `coding` from `review`.
 - The runtime also appends JSONL audit records under `workspace.root/.harness-history/`.
+- If `logging.capture_prompts = true`, the Codex runner also appends per-issue JSONL prompt transcripts under `workspace.root/.harness-prompts/`.
+- Prompt transcripts record the plain rendered turn prompt plus raw stdin/stdout/stderr lines for that issue attempt.
+- Prompt transcripts are not included in `GET /api/v1/state` or `GET /api/v1/issues/{identifier}`.

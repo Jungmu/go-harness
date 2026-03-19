@@ -167,7 +167,7 @@ Codex app-server subprocess 생성, startup handshake, event streaming, continua
 app-server 세션에 주입할 tracker write용 동적 도구를 정의하고, 현재 issue와 현재 project 범위 안에서만 mutation이 일어나게 한다.
 
 8. Observability
-구조화 로그, 설정 가능한 로그 레벨, 상태 스냅샷, HTTP 상태 surface, 최근 이벤트 버퍼, issue별 timeline history JSONL, token/rate-limit 집계를 제공한다.
+구조화 로그, 설정 가능한 로그 레벨, 상태 스냅샷, HTTP 상태 surface, 최근 이벤트 버퍼, issue별 timeline history JSONL, 선택적 raw prompt transcript JSONL, token/rate-limit 집계를 제공한다.
 
 ## 9. 제안 디렉터리 구조
 

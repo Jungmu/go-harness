@@ -767,18 +767,25 @@ func TestIssueSnapshotReturnsPerIssueHistoryBeyondRecentActivityLimit(t *testing
 	}
 }
 
-func TestOrchestratorStartupCleanupRemovesTerminalWorkspaceAndKeepsHistory(t *testing.T) {
+func TestOrchestratorStartupCleanupRemovesTerminalWorkspaceAndKeepsAuditFiles(t *testing.T) {
 	cfg := loadTestConfig(t)
 	workspacePath := filepath.Join(cfg.Workspace.Root, "ABC-1")
 	historyPath := filepath.Join(cfg.Workspace.Root, ".harness-history", "ABC-1.jsonl")
+	promptTranscriptPath := filepath.Join(cfg.Workspace.Root, ".harness-prompts", "ABC-1.jsonl")
 	if err := os.MkdirAll(filepath.Dir(historyPath), 0o755); err != nil {
 		t.Fatalf("MkdirAll(history) error = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(promptTranscriptPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(prompt transcript) error = %v", err)
 	}
 	if err := os.MkdirAll(workspacePath, 0o755); err != nil {
 		t.Fatalf("MkdirAll(workspace) error = %v", err)
 	}
 	if err := os.WriteFile(historyPath, []byte("event\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(history) error = %v", err)
+	}
+	if err := os.WriteFile(promptTranscriptPath, []byte("prompt\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt transcript) error = %v", err)
 	}
 
 	tracker := &fakeTracker{
@@ -807,6 +814,9 @@ func TestOrchestratorStartupCleanupRemovesTerminalWorkspaceAndKeepsHistory(t *te
 	}
 	if _, err := os.Stat(historyPath); err != nil {
 		t.Fatalf("history file missing after startup cleanup: %v", err)
+	}
+	if _, err := os.Stat(promptTranscriptPath); err != nil {
+		t.Fatalf("prompt transcript missing after startup cleanup: %v", err)
 	}
 }
 

@@ -174,6 +174,9 @@ Handle {{ issue.identifier }}
 	if cfg.Logging.Level != defaultLogLevel {
 		t.Fatalf("Logging.Level = %q, want %q", cfg.Logging.Level, defaultLogLevel)
 	}
+	if cfg.Logging.CapturePrompts {
+		t.Fatal("Logging.CapturePrompts = true, want false by default")
+	}
 	if cfg.Workspace.Root != filepath.Clean(filepath.Join(root, "workspaces")) {
 		t.Fatalf("Workspace.Root = %q", cfg.Workspace.Root)
 	}
@@ -397,6 +400,39 @@ Prompt
 	}
 	if validationErr.Field != "logging.level" {
 		t.Fatalf("ValidationError.Field = %q, want logging.level", validationErr.Field)
+	}
+}
+
+func TestStoreLoadAndValidateRejectsNonBooleanCapturePrompts(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("LINEAR_API_KEY", "linear-token")
+
+	path := filepath.Join(root, "WORKFLOW.md")
+	content := `---
+tracker:
+  kind: linear
+  api_key: $LINEAR_API_KEY
+  project_slug: TEST
+logging:
+  capture_prompts: verbose
+---
+Prompt
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := NewStore(workflow.NewLoader()).LoadAndValidate(path)
+	if err == nil {
+		t.Fatal("LoadAndValidate() error = nil, want error")
+	}
+
+	var validationErr *ValidationError
+	if !errors.As(err, &validationErr) {
+		t.Fatalf("error type = %T, want *ValidationError", err)
+	}
+	if validationErr.Field != "logging.capture_prompts" {
+		t.Fatalf("ValidationError.Field = %q, want logging.capture_prompts", validationErr.Field)
 	}
 }
 
@@ -625,6 +661,7 @@ polling:
   interval_ms: 50
 logging:
   level: debug
+  capture_prompts: true
 ---
 Prompt v2
 `
@@ -647,6 +684,9 @@ Prompt v2
 	}
 	if reloaded.Logging.Level != "debug" {
 		t.Fatalf("Logging.Level = %q, want debug", reloaded.Logging.Level)
+	}
+	if !reloaded.Logging.CapturePrompts {
+		t.Fatal("Logging.CapturePrompts = false, want true after reload")
 	}
 	if store.DispatchValidationError() != nil {
 		t.Fatalf("DispatchValidationError() = %v, want nil after valid reload", store.DispatchValidationError())

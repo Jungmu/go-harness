@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -30,7 +31,7 @@ func TestRunnerRunAttemptHandshakeAndUsage(t *testing.T) {
 		TurnTimeout:       testAppServerTimeout,
 		ReadTimeout:       testAppServerTimeout,
 		StallTimeout:      testAppServerTimeout,
-	}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	}, config.LoggingConfig{}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	result, err := runner.RunAttempt(context.Background(), domain.Issue{Identifier: "ABC-1", Title: "Example"}, workspace, "prompt", 1, nil, nil)
 	if err != nil {
@@ -73,7 +74,7 @@ func TestRunnerUnsupportedToolCallContinues(t *testing.T) {
 		TurnTimeout:       testAppServerTimeout,
 		ReadTimeout:       testAppServerTimeout,
 		StallTimeout:      testAppServerTimeout,
-	}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	}, config.LoggingConfig{}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	var events []string
 	_, err := runner.RunAttempt(context.Background(), domain.Issue{Identifier: "ABC-1", Title: "Example"}, workspace, "prompt", 1, func(event Event) {
@@ -84,6 +85,52 @@ func TestRunnerUnsupportedToolCallContinues(t *testing.T) {
 	}
 	if !slices.Contains(events, "unsupported_tool_call") {
 		t.Fatalf("events = %#v, want unsupported_tool_call", events)
+	}
+}
+
+func TestRunnerCapturePromptsWritesTranscriptJSONL(t *testing.T) {
+	t.Parallel()
+
+	workspace := domain.Workspace{Path: t.TempDir(), WorkspaceKey: "ABC-1"}
+	script := writeFakeAppServer(t, workspace.Path, 1, false)
+	runner := NewRunner(config.CodexConfig{
+		Command:           `"` + script + `"`,
+		ApprovalPolicy:    "never",
+		ThreadSandbox:     "workspace-write",
+		TurnSandboxPolicy: map[string]any{"type": "workspace-write"},
+		TurnTimeout:       testAppServerTimeout,
+		ReadTimeout:       testAppServerTimeout,
+		StallTimeout:      testAppServerTimeout,
+	}, config.LoggingConfig{CapturePrompts: true}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+
+	_, err := runner.RunAttempt(context.Background(), domain.Issue{ID: "1", Identifier: "ABC-1", Title: "Example"}, workspace, "first line\nsecond line", 1, nil, nil)
+	if err != nil {
+		t.Fatalf("RunAttempt() error = %v", err)
+	}
+
+	path := filepath.Join(filepath.Dir(workspace.Path), promptTranscriptDirname, "ABC-1.jsonl")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", path, err)
+	}
+
+	var entries []transcriptEntry
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var entry transcriptEntry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("Unmarshal(transcript line) error = %v; line=%q", err, line)
+		}
+		entries = append(entries, entry)
+	}
+
+	if !containsTranscriptEntry(entries, "send", "prompt", "first line\nsecond line") {
+		t.Fatalf("prompt transcript missing rendered prompt: %#v", entries)
+	}
+	if !containsTranscriptEntry(entries, "send", "stdin", `"method":"turn/start"`) {
+		t.Fatalf("prompt transcript missing turn/start request: %#v", entries)
+	}
+	if !containsTranscriptEntry(entries, "recv", "stdout", `"method":"turn/completed"`) {
+		t.Fatalf("prompt transcript missing turn/completed response: %#v", entries)
 	}
 }
 
@@ -100,7 +147,7 @@ func TestRunnerContinuationReusesThreadAndStartsSecondTurn(t *testing.T) {
 		TurnTimeout:       testAppServerTimeout,
 		ReadTimeout:       testAppServerTimeout,
 		StallTimeout:      testAppServerTimeout,
-	}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	}, config.LoggingConfig{}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	var startedEvents []Event
 	result, err := runner.RunAttempt(context.Background(), domain.Issue{Identifier: "ABC-1", Title: "Example", State: "In Progress"}, workspace, "prompt", 1, func(event Event) {
@@ -162,7 +209,7 @@ func TestRunnerUsesStartedNotificationsWhenResponsesAreEmpty(t *testing.T) {
 		TurnTimeout:       testAppServerTimeout,
 		ReadTimeout:       testAppServerTimeout,
 		StallTimeout:      testAppServerTimeout,
-	}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	}, config.LoggingConfig{}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	result, err := runner.RunAttempt(context.Background(), domain.Issue{Identifier: "ABC-1", Title: "Example"}, workspace, "prompt", 1, nil, nil)
 	if err != nil {
@@ -189,7 +236,7 @@ func TestRunnerUsesStartedNotificationsWithoutResponses(t *testing.T) {
 		TurnTimeout:       testAppServerTimeout,
 		ReadTimeout:       testAppServerTimeout,
 		StallTimeout:      testAppServerTimeout,
-	}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	}, config.LoggingConfig{}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	result, err := runner.RunAttempt(context.Background(), domain.Issue{Identifier: "ABC-1", Title: "Example"}, workspace, "prompt", 1, nil, nil)
 	if err != nil {
@@ -250,6 +297,15 @@ done
 		t.Fatal(err)
 	}
 	return path
+}
+
+func containsTranscriptEntry(entries []transcriptEntry, direction, channel, snippet string) bool {
+	for _, entry := range entries {
+		if entry.Direction == direction && entry.Channel == channel && strings.Contains(entry.Payload, snippet) {
+			return true
+		}
+	}
+	return false
 }
 
 func writeFakeNotificationAppServer(t *testing.T, dir string) string {

@@ -12,6 +12,7 @@ This repository currently contains a working runtime slice for local operation:
 - automatic Linear state transitions to `In Progress` on start and `Done` on successful completion
 - optional in-process review lane driven by `REVIEW-WORKFLOW.md`
 - issue timeline logging to `.harness-history/*.jsonl` under `workspace.root`
+- optional raw prompt transcript logging to `.harness-prompts/*.jsonl` under `workspace.root`
 - HTTP status endpoints, HTML dashboard, and CLI `status`
 - startup terminal-workspace cleanup and deterministic dispatch ordering
 
@@ -71,6 +72,7 @@ workspace:
   root: ~/symphony-workspaces
 logging:
   level: info
+  capture_prompts: false
 server:
   port: 8080
 ---
@@ -88,6 +90,7 @@ Notes:
 - `tracker.project_slug` may also be set via `$ENV_VAR`
 - `workspace.root` supports `~` and environment expansion
 - `logging.level` accepts `debug`, `info`, `warn`, or `error`
+- `logging.capture_prompts` accepts `true` or `false`; set it to `true` only in development if you want raw prompt transcripts on disk
 - if no workflow path is passed, the daemon looks for `WORKFLOW.md` in its current working directory and then next to the executable
 - `server.port` must be set in `WORKFLOW.md` or overridden with `--port` if you want the HTTP API enabled
 - a fuller example is available at `examples/WORKFLOW.md`
@@ -120,6 +123,7 @@ Important:
 - the agent session runs inside per-issue workspaces under `workspace.root`
 - if `REVIEW-WORKFLOW.md` exists next to the active `WORKFLOW.md`, the daemon starts a second in-process review orchestrator
 - set `logging.level: debug` if you want a poll heartbeat and candidate-count logs while the daemon is idle
+- set `logging.capture_prompts: true` only when you need raw Codex exchange logs on disk for debugging
 - startup logs print the resolved workflow path, `.env` path, and all tracked environment entries with sensitive values redacted
 
 ## Status And Operations
@@ -152,7 +156,9 @@ Execution history:
 - the dashboard renders the same timeline in the `Recent Activity` panel
 - `GET /api/v1/issues/{identifier}` returns the per-issue in-memory history buffer, not just the global recent-activity window
 - the harness also appends per-issue JSONL history files under `workspace.root/.harness-history/`
-- cleanup removes the workspace directory, but not the `.harness-history` audit trail
+- if `logging.capture_prompts` is enabled, the runner also appends raw prompt/stdin/stdout/stderr transcript files under `workspace.root/.harness-prompts/`
+- raw prompt transcripts are file-only; they are not exposed through the HTTP status API or dashboard
+- cleanup removes the workspace directory, but not the `.harness-history` or `.harness-prompts` audit trail
 
 Review lane:
 
@@ -178,7 +184,7 @@ Issue state transitions:
 Startup cleanup:
 
 - on startup, the harness fetches terminal issues for the configured project and removes matching workspaces under `workspace.root`
-- startup cleanup keeps `.harness-history` files and only removes per-issue workspace directories
+- startup cleanup keeps `.harness-history` and `.harness-prompts` files and only removes per-issue workspace directories
 - cleanup fetch failures are logged as warnings and do not block daemon startup
 
 ## Live E2E
