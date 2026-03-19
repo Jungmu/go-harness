@@ -369,6 +369,126 @@ func TestClientPollCandidatesFallsBackToProjectName(t *testing.T) {
 	}
 }
 
+func TestClientUpsertProgressCommentCreatesWhenMissing(t *testing.T) {
+	t.Parallel()
+
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload graphqlRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+
+		switch {
+		case strings.Contains(payload.Query, "comments(first: $commentFirst)"):
+			requests = append(requests, "list")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"issues": map[string]any{
+						"nodes": []map[string]any{
+							{
+								"id": "issue-1",
+								"comments": map[string]any{
+									"nodes": []map[string]any{},
+								},
+							},
+						},
+					},
+				},
+			})
+		case strings.Contains(payload.Query, "commentCreate(input: { issueId: $issueId, body: $body })"):
+			requests = append(requests, "create")
+			if got := payload.Variables["issueId"]; got != "issue-1" {
+				t.Fatalf("issueId = %#v, want issue-1", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"commentCreate": map[string]any{
+						"success": true,
+						"comment": map[string]any{"id": "comment-1"},
+					},
+				},
+			})
+		default:
+			t.Fatalf("unexpected query: %s", payload.Query)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.Client(), config.TrackerConfig{
+		Endpoint: server.URL,
+		APIKey:   "token-123",
+	})
+
+	if err := client.UpsertProgressComment(context.Background(), domain.Issue{ID: "issue-1", Identifier: "ABC-1"}, domain.HarnessProgressCommentHeading+"\n\nrunning"); err != nil {
+		t.Fatalf("UpsertProgressComment() error = %v", err)
+	}
+	if !slices.Equal(requests, []string{"list", "create"}) {
+		t.Fatalf("requests = %#v, want [list create]", requests)
+	}
+}
+
+func TestClientUpsertProgressCommentUpdatesExistingComment(t *testing.T) {
+	t.Parallel()
+
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload graphqlRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+
+		switch {
+		case strings.Contains(payload.Query, "comments(first: $commentFirst)"):
+			requests = append(requests, "list")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"issues": map[string]any{
+						"nodes": []map[string]any{
+							{
+								"id": "issue-1",
+								"comments": map[string]any{
+									"nodes": []map[string]any{
+										{"id": "comment-7", "body": domain.HarnessProgressCommentHeading + "\n\nold body"},
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+		case strings.Contains(payload.Query, "commentUpdate(id: $id, input: { body: $body })"):
+			requests = append(requests, "update")
+			if got := payload.Variables["id"]; got != "comment-7" {
+				t.Fatalf("id = %#v, want comment-7", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"commentUpdate": map[string]any{
+						"success": true,
+						"comment": map[string]any{"id": "comment-7"},
+					},
+				},
+			})
+		default:
+			t.Fatalf("unexpected query: %s", payload.Query)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.Client(), config.TrackerConfig{
+		Endpoint: server.URL,
+		APIKey:   "token-123",
+	})
+
+	if err := client.UpsertProgressComment(context.Background(), domain.Issue{ID: "issue-1", Identifier: "ABC-1"}, domain.HarnessProgressCommentHeading+"\n\nupdated"); err != nil {
+		t.Fatalf("UpsertProgressComment() error = %v", err)
+	}
+	if !slices.Equal(requests, []string{"list", "update"}) {
+		t.Fatalf("requests = %#v, want [list update]", requests)
+	}
+}
+
 func sampleIssuePayload(identifier string) map[string]any {
 	return map[string]any{
 		"id":          "issue-" + identifier,

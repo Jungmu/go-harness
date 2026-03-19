@@ -38,6 +38,11 @@ func (d *dynamicTracker) TransitionState(ctx context.Context, issue domain.Issue
 	return linear.NewClient(d.httpClient, cfg.Tracker).TransitionState(ctx, issue, stateName)
 }
 
+func (d *dynamicTracker) UpsertProgressComment(ctx context.Context, issue domain.Issue, body string) error {
+	cfg := d.store.Current()
+	return linear.NewClient(d.httpClient, cfg.Tracker).UpsertProgressComment(ctx, issue, body)
+}
+
 type dynamicWorkspaceManager struct {
 	store  *config.Store
 	logger *slog.Logger

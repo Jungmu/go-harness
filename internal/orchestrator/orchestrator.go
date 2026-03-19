@@ -22,16 +22,17 @@ import (
 )
 
 const (
-	recentEventLimit    = 50
-	timelineEventLimit  = 200
-	recentActivityLimit = 100
-	slotRetryDelay      = 1 * time.Second
-	baseRetryBackoff    = 5 * time.Second
-	startStateName      = "In Progress"
-	doneStateName       = "Done"
-	reviewStateName     = "In Review"
-	codingWorkerName    = "coding"
-	reviewWorkerName    = "review"
+	recentEventLimit       = 50
+	timelineEventLimit     = 200
+	recentActivityLimit    = 100
+	slotRetryDelay         = 1 * time.Second
+	baseRetryBackoff       = 5 * time.Second
+	progressCommentTimeout = 15 * time.Second
+	startStateName         = "In Progress"
+	doneStateName          = "Done"
+	reviewStateName        = "In Review"
+	codingWorkerName       = "coding"
+	reviewWorkerName       = "review"
 )
 
 type Tracker interface {
@@ -39,6 +40,7 @@ type Tracker interface {
 	PollTerminalIssues(ctx context.Context) ([]domain.Issue, error)
 	FetchByIDs(ctx context.Context, ids []string) ([]domain.Issue, error)
 	TransitionState(ctx context.Context, issue domain.Issue, stateName string) (domain.Issue, error)
+	UpsertProgressComment(ctx context.Context, issue domain.Issue, body string) error
 }
 
 type WorkspaceManager interface {
@@ -135,6 +137,17 @@ type timelineUpdate struct {
 	Workspace    domain.Workspace
 	Event        domain.TimelineEvent
 	ApplyToIssue *domain.Issue
+}
+
+type progressCommentUpdate struct {
+	Attempt        int
+	Status         string
+	Summary        string
+	Worker         string
+	UpdatedAt      time.Time
+	NextRetryAt    time.Time
+	LastError      string
+	PullRequestURL string
 }
 
 type cleanupResult struct {
@@ -753,7 +766,7 @@ func (o *Orchestrator) executeAttempt(ctx context.Context, issue domain.Issue, a
 		}
 	}
 
-	runIssue, err := o.startIssueForAttempt(ctx, issue)
+	runIssue, err := o.startIssueForAttempt(ctx, issue, attempt)
 	if err != nil {
 		_ = o.workspaces.AfterRun(context.Background(), workspace)
 		o.pushEvent(workerExit{Issue: issue, Attempt: attempt, Workspace: workspace, Err: err})
@@ -867,11 +880,25 @@ func (o *Orchestrator) executeAttempt(ctx context.Context, issue domain.Issue, a
 	})
 }
 
-func (o *Orchestrator) startIssueForAttempt(ctx context.Context, issue domain.Issue) (domain.Issue, error) {
+func (o *Orchestrator) startIssueForAttempt(ctx context.Context, issue domain.Issue, attempt int) (domain.Issue, error) {
 	if o.reviewMode {
+		o.syncProgressComment(ctx, issue, progressCommentUpdate{
+			Attempt: attempt,
+			Status:  "running",
+			Summary: "review attempt started",
+		})
 		return issue, nil
 	}
-	return o.transitionIssueState(ctx, issue, startStateName, "issue moved to in-progress")
+	started, err := o.transitionIssueState(ctx, issue, startStateName, "issue moved to in-progress")
+	if err != nil {
+		return issue, err
+	}
+	o.syncProgressComment(ctx, started, progressCommentUpdate{
+		Attempt: attempt,
+		Status:  "running",
+		Summary: "issue moved to in-progress",
+	})
+	return started, nil
 }
 
 func (o *Orchestrator) augmentPrompt(prompt string, workspace domain.Workspace) string {
@@ -932,19 +959,31 @@ func (o *Orchestrator) completeIssueIfNeeded(ctx context.Context, issue domain.I
 		}
 		switch verdict.Decision {
 		case reviewDecisionDone:
-			if _, err := o.ensurePullRequest(ctx, coalesceIssue(result.RefreshedIssue, issue), workspace, attempt); err != nil {
+			pullRequest, err := o.ensurePullRequest(ctx, coalesceIssue(result.RefreshedIssue, issue), workspace, attempt)
+			if err != nil {
 				return nil, "", err
 			}
 			completed, err := o.transitionIssueState(ctx, coalesceIssue(result.RefreshedIssue, issue), doneStateName, "review accepted and issue moved to done")
 			if err != nil {
 				return nil, "", err
 			}
+			o.syncProgressComment(ctx, completed, progressCommentUpdate{
+				Attempt:        attempt,
+				Status:         "completed",
+				Summary:        "review accepted and issue moved to done",
+				PullRequestURL: pullRequest.URL,
+			})
 			return &completed, "", nil
 		case reviewDecisionTodo:
 			reopened, err := o.transitionIssueState(ctx, coalesceIssue(result.RefreshedIssue, issue), "Todo", "review found blocking issues and moved issue back to todo")
 			if err != nil {
 				return nil, "", err
 			}
+			o.syncProgressComment(ctx, reopened, progressCommentUpdate{
+				Attempt: attempt,
+				Status:  "released",
+				Summary: "review found blocking issues and moved issue back to todo",
+			})
 			return &reopened, reviewRejectedStopReason, nil
 		default:
 			return nil, "", fmt.Errorf("unsupported review decision %q", verdict.Decision)
@@ -957,6 +996,11 @@ func (o *Orchestrator) completeIssueIfNeeded(ctx context.Context, issue domain.I
 			if err != nil {
 				return nil, "", err
 			}
+			o.syncProgressComment(ctx, handoff, progressCommentUpdate{
+				Attempt: attempt,
+				Status:  "handoff",
+				Summary: "issue moved to in-review after max turns reached",
+			})
 			return &handoff, "", nil
 		}
 		return result.RefreshedIssue, "", nil
@@ -973,13 +1017,20 @@ func (o *Orchestrator) completeIssueIfNeeded(ctx context.Context, issue domain.I
 		}
 	}
 
-	if _, err := o.ensurePullRequest(ctx, coalesceIssue(result.RefreshedIssue, issue), workspace, attempt); err != nil {
+	pullRequest, err := o.ensurePullRequest(ctx, coalesceIssue(result.RefreshedIssue, issue), workspace, attempt)
+	if err != nil {
 		return nil, "", err
 	}
 	completed, err := o.transitionIssueState(ctx, coalesceIssue(result.RefreshedIssue, issue), doneStateName, "issue moved to done")
 	if err != nil {
 		return nil, "", err
 	}
+	o.syncProgressComment(ctx, completed, progressCommentUpdate{
+		Attempt:        attempt,
+		Status:         "completed",
+		Summary:        "issue moved to done",
+		PullRequestURL: pullRequest.URL,
+	})
 	return &completed, "", nil
 }
 
@@ -1357,7 +1408,7 @@ func (o *Orchestrator) applyWorkerExit(ctx context.Context, st *state, exit work
 			Workspace:    exit.Workspace.Path,
 			Message:      "attempt completed but the issue remains active",
 		})
-		o.scheduleRetry(st, *exit.Refreshed, exit.Attempt+1, reason, "", time.Now().UTC())
+		o.scheduleRetry(ctx, st, *exit.Refreshed, exit.Attempt+1, reason, "", time.Now().UTC())
 	case exit.Err == nil:
 		delete(st.claimed, exit.Issue.ID)
 		o.recordTimeline(st, exit.Issue, exit.Workspace, domain.TimelineEvent{
@@ -1398,13 +1449,13 @@ func (o *Orchestrator) applyWorkerExit(ctx context.Context, st *state, exit work
 			Message:      "attempt failed and will be retried",
 		})
 		o.logger.Error("attempt failed", slog.String("issue", exit.Issue.Identifier), slog.Int("attempt", exit.Attempt), slog.Any("error", exit.Err))
-		o.scheduleRetry(st, exit.Issue, exit.Attempt+1, retryReason(exit.Err), entry.lastError, time.Now().UTC())
+		o.scheduleRetry(ctx, st, exit.Issue, exit.Attempt+1, retryReason(exit.Err), entry.lastError, time.Now().UTC())
 	}
 
 	_ = ctx
 }
 
-func (o *Orchestrator) scheduleRetry(st *state, issue domain.Issue, attempt int, reason, lastError string, now time.Time) {
+func (o *Orchestrator) scheduleRetry(ctx context.Context, st *state, issue domain.Issue, attempt int, reason, lastError string, now time.Time) {
 	st.claimed[issue.ID] = struct{}{}
 	dueAt := now.Add(backoff(attempt, o.cfg.Agent.MaxRetryBackoff))
 	st.retryQueue[issue.ID] = domain.RetryEntry{
@@ -1439,6 +1490,13 @@ func (o *Orchestrator) scheduleRetry(st *state, issue domain.Issue, attempt int,
 		slog.Time("due_at", dueAt),
 		slog.String("last_error", truncateLogValue(lastError, 240)),
 	)
+	o.syncProgressComment(ctx, issue, progressCommentUpdate{
+		Attempt:     attempt,
+		Status:      "retrying",
+		Summary:     "issue scheduled for a future retry",
+		NextRetryAt: dueAt,
+		LastError:   lastError,
+	})
 }
 
 func (o *Orchestrator) publishSnapshot(st *state) {
@@ -1621,6 +1679,53 @@ func retryReason(err error) string {
 	default:
 		return "attempt_failed"
 	}
+}
+
+func (o *Orchestrator) syncProgressComment(ctx context.Context, issue domain.Issue, update progressCommentUpdate) {
+	if strings.TrimSpace(issue.ID) == "" {
+		return
+	}
+	if strings.TrimSpace(update.Worker) == "" {
+		update.Worker = o.workerName
+	}
+	if update.UpdatedAt.IsZero() {
+		update.UpdatedAt = time.Now().UTC()
+	}
+	commentCtx, cancel := context.WithTimeout(ctx, progressCommentTimeout)
+	defer cancel()
+
+	if err := o.tracker.UpsertProgressComment(commentCtx, issue, renderProgressComment(issue, update)); err != nil {
+		o.logger.Warn("progress comment update failed",
+			slog.String("issue", issue.Identifier),
+			slog.Any("error", err),
+		)
+	}
+}
+
+func renderProgressComment(issue domain.Issue, update progressCommentUpdate) string {
+	lines := []string{
+		domain.HarnessProgressCommentHeading,
+		"",
+		"Updated automatically by Go Harness.",
+		"",
+		"- Issue: `" + strings.TrimSpace(issue.Identifier) + "`",
+		"- Status: `" + strings.TrimSpace(update.Status) + "`",
+		"- Worker: `" + strings.TrimSpace(update.Worker) + "`",
+		"- Tracker state: `" + strings.TrimSpace(issue.State) + "`",
+		fmt.Sprintf("- Attempt: `%d`", update.Attempt),
+		"- Updated at (UTC): `" + update.UpdatedAt.UTC().Format(time.RFC3339) + "`",
+		"- Summary: " + strings.TrimSpace(update.Summary),
+	}
+	if url := strings.TrimSpace(update.PullRequestURL); url != "" {
+		lines = append(lines, "- Pull request: "+url)
+	}
+	if !update.NextRetryAt.IsZero() {
+		lines = append(lines, "- Next retry at (UTC): `"+update.NextRetryAt.UTC().Format(time.RFC3339)+"`")
+	}
+	if lastError := strings.TrimSpace(update.LastError); lastError != "" {
+		lines = append(lines, "- Last error: "+truncateLogValue(lastError, 500))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (o *Orchestrator) pushEvent(event any) {

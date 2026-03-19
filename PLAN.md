@@ -89,7 +89,7 @@ v1은 local worker only로 제한한다.
 `WORKFLOW.md`, `AGENTS.md`, 검증 스크립트, workspace hooks를 저장소에 둔다.
 
 3. 오케스트레이터는 상태 관리자다.
-이슈 코멘트 같은 ticket mutation은 가능한 한 agent가 수행하되, 기본 `In Progress`/`Done` 상태 전환과 `Done` 직전 GitHub PR 생성은 harness가 책임진다.
+이슈 코멘트 같은 ticket mutation은 가능한 한 agent가 수행하되, 기본 상태 전환, persistent progress comment 유지, `Done` 직전 GitHub PR 생성은 harness가 책임진다.
 
 4. DB 없이도 운영 가능해야 한다.
 단일 프로세스, 메모리 상태, 파일 기반 로그, 상태 API만으로 시작한다.
@@ -118,6 +118,7 @@ trusted environment 전제를 두더라도 path validation, scope narrowing, tim
 - continuation turn 처리
 - 실패 재시도와 exponential backoff
 - 이슈 상태 변경 시 실행 중단과 cleanup
+- persistent Linear progress comment upsert
 - JSON structured logging
 - read-only 상태 조회 API
 - `POST /api/v1/refresh` 운영 트리거

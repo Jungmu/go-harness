@@ -129,6 +129,7 @@ Unknown variables and filters return `workflow_template_render_error`.
 - On startup, the runtime fetches terminal issues for the configured project and removes matching workspace directories under `workspace.root`.
 - On startup, if `github.token` is absent, the runtime resolves a token with `gh auth token --hostname <host>` before starting the orchestrator.
 - Before the first turn starts, the runtime moves a claimed issue to `In Progress` if it is not already there.
+- When work starts, retries, hands off to review, or completes, the runtime creates or updates one persistent Linear comment whose body starts with `## Harness Progress`.
 - The first turn prompt is rendered from the `WORKFLOW.md` body template.
 - If the issue is still active after `turn/completed`, the runner reuses the same live Codex thread and workspace.
 - Continuation turns use an internal continuation prompt instead of re-rendering the full workflow template.
@@ -162,6 +163,7 @@ This is currently implemented as poll-time file change detection, not an `fsnoti
 - `GET /api/v1/issues/{identifier}` returns the per-issue in-memory history buffer for the identifier when present.
 - Running snapshots include `live_session.worker` so operators can distinguish `coding` from `review`.
 - The runtime also appends JSONL audit records under `workspace.root/.harness-history/`.
+- The persistent `## Harness Progress` Linear comment is tracker-only state; it is not projected into the HTTP status API.
 - If `logging.capture_prompts = true`, the Codex runner also appends per-issue JSONL prompt transcripts under `workspace.root/.harness-prompts/`.
 - Prompt transcripts record the plain rendered turn prompt plus raw stdin/stdout/stderr lines for that issue attempt.
 - Prompt transcripts are not included in `GET /api/v1/state` or `GET /api/v1/issues/{identifier}`.

@@ -24,7 +24,7 @@ The current implementation is intended for trusted local or small-team environme
 - agent runtime: local `codex app-server`
 - persistence: no database
 - status surface: HTTP + HTML dashboard + CLI
-- tracker writes: automatic `In Progress` and `Done` transitions only
+- tracker writes: automatic state transitions plus a persistent Linear progress comment
 
 More detail lives in `PLAN.md`, `SPEC.md`, and the docs under `docs/`.
 
@@ -312,7 +312,7 @@ If a repository-root `.env` file exists, `make test` and `make test-live-e2e` lo
 ## Limitations
 
 - no persistent scheduler state across restarts
-- no tracker write tools beyond automatic `In Progress` and `Done` transitions
+- no tracker write tools beyond automatic state transitions and the persistent harness progress comment
 - no remote worker support
 - no auth or multi-tenant control plane
 - live Linear + real Codex coverage is opt-in only

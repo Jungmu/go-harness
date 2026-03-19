@@ -121,6 +121,38 @@ mutation SymphonyLinearIssueUpdateState($id: String!, $stateId: String!) {
     success
   }
 }`
+	issueCommentsQuery = `
+query SymphonyLinearIssueComments($ids: [ID!]!, $first: Int!, $commentFirst: Int!) {
+  issues(filter: {id: {in: $ids}}, first: $first) {
+    nodes {
+      id
+      comments(first: $commentFirst) {
+        nodes {
+          id
+          body
+        }
+      }
+    }
+  }
+}`
+	commentCreateQuery = `
+mutation SymphonyLinearCommentCreate($issueId: String!, $body: String!) {
+  commentCreate(input: { issueId: $issueId, body: $body }) {
+    success
+    comment {
+      id
+    }
+  }
+}`
+	commentUpdateQuery = `
+mutation SymphonyLinearCommentUpdate($id: String!, $body: String!) {
+  commentUpdate(id: $id, input: { body: $body }) {
+    success
+    comment {
+      id
+    }
+  }
+}`
 )
 
 type Client struct {
@@ -289,6 +321,25 @@ func (c *Client) TransitionState(ctx context.Context, issue domain.Issue, target
 	return issue, nil
 }
 
+func (c *Client) UpsertProgressComment(ctx context.Context, issue domain.Issue, body string) error {
+	if strings.TrimSpace(issue.ID) == "" {
+		return fmt.Errorf("upsert progress comment: missing issue id")
+	}
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return fmt.Errorf("upsert progress comment: missing body")
+	}
+
+	comments, err := c.listIssueComments(ctx, issue.ID)
+	if err != nil {
+		return err
+	}
+	if existing := findHarnessProgressComment(comments); existing != nil {
+		return c.updateComment(ctx, existing.ID, body)
+	}
+	return c.createComment(ctx, issue.ID, body)
+}
+
 func (c *Client) doGraphQL(ctx context.Context, payload graphqlRequest) ([]byte, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -319,6 +370,11 @@ func (c *Client) doGraphQL(ctx context.Context, payload graphqlRequest) ([]byte,
 	}
 
 	return raw, nil
+}
+
+type issueComment struct {
+	ID   string
+	Body string
 }
 
 type issuePageInfo struct {
@@ -512,6 +568,122 @@ func decodeIssueUpdateSuccess(raw []byte) error {
 	}
 	if !payload.Data.IssueUpdate.Success {
 		return fmt.Errorf("linear issueUpdate did not report success")
+	}
+	return nil
+}
+
+func (c *Client) listIssueComments(ctx context.Context, issueID string) ([]issueComment, error) {
+	body, err := c.doGraphQL(ctx, graphqlRequest{
+		Query: issueCommentsQuery,
+		Variables: map[string]any{
+			"ids":          []string{issueID},
+			"first":        1,
+			"commentFirst": 100,
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return decodeIssueComments(body, issueID)
+}
+
+func decodeIssueComments(raw []byte, issueID string) ([]issueComment, error) {
+	var payload struct {
+		Data struct {
+			Issues struct {
+				Nodes []struct {
+					ID       string `json:"id"`
+					Comments struct {
+						Nodes []struct {
+							ID   string `json:"id"`
+							Body string `json:"body"`
+						} `json:"nodes"`
+					} `json:"comments"`
+				} `json:"nodes"`
+			} `json:"issues"`
+		} `json:"data"`
+		Errors []map[string]any `json:"errors"`
+	}
+
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, err
+	}
+	if len(payload.Errors) > 0 {
+		return nil, fmt.Errorf("linear graphql errors: %v", payload.Errors)
+	}
+	if len(payload.Data.Issues.Nodes) == 0 {
+		return nil, fmt.Errorf("linear issue not found for issue_id=%q", issueID)
+	}
+
+	comments := make([]issueComment, 0, len(payload.Data.Issues.Nodes[0].Comments.Nodes))
+	for _, comment := range payload.Data.Issues.Nodes[0].Comments.Nodes {
+		if strings.TrimSpace(comment.ID) == "" {
+			continue
+		}
+		comments = append(comments, issueComment{
+			ID:   strings.TrimSpace(comment.ID),
+			Body: comment.Body,
+		})
+	}
+	return comments, nil
+}
+
+func findHarnessProgressComment(comments []issueComment) *issueComment {
+	for i := range comments {
+		if strings.HasPrefix(strings.TrimSpace(comments[i].Body), domain.HarnessProgressCommentHeading) {
+			return &comments[i]
+		}
+	}
+	return nil
+}
+
+func (c *Client) createComment(ctx context.Context, issueID, body string) error {
+	raw, err := c.doGraphQL(ctx, graphqlRequest{
+		Query: commentCreateQuery,
+		Variables: map[string]any{
+			"issueId": issueID,
+			"body":    body,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	return decodeCommentMutationSuccess(raw, "commentCreate")
+}
+
+func (c *Client) updateComment(ctx context.Context, commentID, body string) error {
+	raw, err := c.doGraphQL(ctx, graphqlRequest{
+		Query: commentUpdateQuery,
+		Variables: map[string]any{
+			"id":   commentID,
+			"body": body,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	return decodeCommentMutationSuccess(raw, "commentUpdate")
+}
+
+func decodeCommentMutationSuccess(raw []byte, field string) error {
+	var payload struct {
+		Data   map[string]map[string]any `json:"data"`
+		Errors []map[string]any          `json:"errors"`
+	}
+
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return err
+	}
+	if len(payload.Errors) > 0 {
+		return fmt.Errorf("linear graphql errors: %v", payload.Errors)
+	}
+	result := payload.Data[field]
+	if result == nil {
+		return fmt.Errorf("linear %s response missing", field)
+	}
+	success, _ := result["success"].(bool)
+	if !success {
+		return fmt.Errorf("linear %s did not report success", field)
 	}
 	return nil
 }

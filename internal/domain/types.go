@@ -9,6 +9,8 @@ import (
 
 var invalidWorkspaceChar = regexp.MustCompile(`[^A-Za-z0-9._-]`)
 
+const HarnessProgressCommentHeading = "## Harness Progress"
+
 type Blocker struct {
 	ID         string `json:"id"`
 	Identifier string `json:"identifier"`

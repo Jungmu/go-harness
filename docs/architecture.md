@@ -7,7 +7,7 @@ The current Go harness implements:
 - `cmd/harnessd` daemon entrypoint
 - workflow/config loading from `WORKFLOW.md`
 - optional sibling `REVIEW-WORKFLOW.md` loading for an in-process review lane
-- Linear polling, issue refresh, GitHub pull request creation, and automatic `In Progress` / `Done` state transitions
+- Linear polling, issue refresh, GitHub pull request creation, automatic state transitions, and a persistent harness progress comment
 - per-issue workspace creation and lifecycle hooks
 - local Codex app-server execution with same-session continuation turns
 - orchestrator-owned runtime state with retry and cancellation
@@ -36,6 +36,7 @@ The current Go harness implements:
   - polls terminal issues for startup cleanup
   - refreshes issues by ID
   - resolves workflow states and transitions issues to `In Progress` and `Done`
+  - creates or updates one persistent `## Harness Progress` comment per issue
   - normalizes Linear issue payloads
 - `internal/workspace`
   - derives sanitized workspace paths
@@ -53,6 +54,7 @@ The current Go harness implements:
   - sorts candidate dispatches by priority, creation time, then identifier
   - transitions issues to `In Progress` before prompt execution
   - creates or reuses the GitHub pull request before any successful `Done` transition
+  - updates the persistent harness progress comment when work starts, retries, hands off, or completes
   - transitions successful runs to `Done` unless the run explicitly stops for retry or external state change
   - runs an optional review lane that keeps issues in `In Review` until a structured verdict moves them to `Done` or `Todo`
   - reconciles terminal/non-active issues

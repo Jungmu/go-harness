@@ -299,6 +299,7 @@ func TestApplyWorkerExitPrefersSuccessfulHandoffOverNonActiveStopReason(t *testi
 func TestOrchestratorContinuationStopsWithoutRetryWhenIssueTurnsTerminal(t *testing.T) {
 	cfg := loadTestConfig(t)
 	cfg.Agent.MaxTurns = 3
+	cfg.Polling.Interval = time.Hour
 
 	active := domain.Issue{ID: "1", Identifier: "ABC-1", Title: "Example", State: "In Progress"}
 	terminal := active
@@ -384,6 +385,105 @@ func TestOrchestratorContinuationStopsWithoutRetryWhenIssueTurnsTerminal(t *test
 	}
 	if fetchCount.Load() != 2 {
 		t.Fatalf("fetch count = %d, want 2", fetchCount.Load())
+	}
+}
+
+func TestOrchestratorUpsertsProgressCommentAcrossLifecycle(t *testing.T) {
+	cfg := loadTestConfig(t)
+	issue := domain.Issue{ID: "1", Identifier: "ABC-1", Title: "Example", State: "Todo"}
+
+	var comments []string
+	tracker := &fakeTracker{
+		pollCandidates: func() []domain.Issue { return []domain.Issue{issue} },
+		fetchByIDs:     func(_ []string) []domain.Issue { return []domain.Issue{issue} },
+		transitionState: func(issue domain.Issue, stateName string) (domain.Issue, error) {
+			issue.State = stateName
+			return issue, nil
+		},
+		upsertProgress: func(_ domain.Issue, body string) error {
+			comments = append(comments, body)
+			return nil
+		},
+	}
+	runner := &fakeRunner{
+		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
+			return codex.RunResult{
+				Session:        domain.LiveSession{SessionID: "thread-1-turn-1", ThreadID: "thread-1", TurnID: "turn-1"},
+				RefreshedIssue: &issue,
+			}, nil
+		},
+	}
+
+	orch := newTestOrchestrator(cfg, tracker, &fakeWorkspaceManager{root: cfg.Workspace.Root}, runner)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := orch.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer func() {
+		_ = orch.Stop(context.Background())
+	}()
+
+	waitFor(t, func() bool {
+		return len(orch.Snapshot().Completed) == 1
+	})
+
+	if len(comments) < 2 {
+		t.Fatalf("progress comments = %#v, want at least start and completion updates", comments)
+	}
+	if !strings.Contains(comments[0], domain.HarnessProgressCommentHeading) || !strings.Contains(comments[0], "issue moved to in-progress") {
+		t.Fatalf("first progress comment = %q", comments[0])
+	}
+	last := comments[len(comments)-1]
+	if !strings.Contains(last, "issue moved to done") {
+		t.Fatalf("final progress comment missing completion summary: %q", last)
+	}
+	if !strings.Contains(last, "https://github.example.com/acme/widgets/pull/1") {
+		t.Fatalf("final progress comment missing pull request URL: %q", last)
+	}
+}
+
+func TestOrchestratorIgnoresProgressCommentFailures(t *testing.T) {
+	cfg := loadTestConfig(t)
+	issue := domain.Issue{ID: "1", Identifier: "ABC-1", Title: "Example", State: "Todo"}
+
+	tracker := &fakeTracker{
+		pollCandidates: func() []domain.Issue { return []domain.Issue{issue} },
+		fetchByIDs:     func(_ []string) []domain.Issue { return []domain.Issue{issue} },
+		transitionState: func(issue domain.Issue, stateName string) (domain.Issue, error) {
+			issue.State = stateName
+			return issue, nil
+		},
+		upsertProgress: func(_ domain.Issue, body string) error {
+			return errors.New("comment write failed")
+		},
+	}
+	runner := &fakeRunner{
+		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
+			return codex.RunResult{
+				Session:        domain.LiveSession{SessionID: "thread-1-turn-1", ThreadID: "thread-1", TurnID: "turn-1"},
+				RefreshedIssue: &issue,
+			}, nil
+		},
+	}
+
+	orch := newTestOrchestrator(cfg, tracker, &fakeWorkspaceManager{root: cfg.Workspace.Root}, runner)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := orch.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer func() {
+		_ = orch.Stop(context.Background())
+	}()
+
+	waitFor(t, func() bool {
+		return len(orch.Snapshot().Completed) == 1
+	})
+
+	snapshot := orch.Snapshot()
+	if len(snapshot.Completed) != 1 || snapshot.Completed[0] != "ABC-1" {
+		t.Fatalf("completed = %#v, want [ABC-1]", snapshot.Completed)
 	}
 }
 
@@ -929,6 +1029,7 @@ type fakeTracker struct {
 	pollTerminalErr    error
 	fetchByIDs         func([]string) []domain.Issue
 	transitionState    func(domain.Issue, string) (domain.Issue, error)
+	upsertProgress     func(domain.Issue, string) error
 }
 
 func (f *fakeTracker) PollCandidates(_ context.Context) ([]domain.Issue, error) {
@@ -961,6 +1062,13 @@ func (f *fakeTracker) TransitionState(_ context.Context, issue domain.Issue, sta
 		return issue, nil
 	}
 	return f.transitionState(issue, stateName)
+}
+
+func (f *fakeTracker) UpsertProgressComment(_ context.Context, issue domain.Issue, body string) error {
+	if f.upsertProgress == nil {
+		return nil
+	}
+	return f.upsertProgress(issue, body)
 }
 
 type fakeWorkspaceManager struct {
