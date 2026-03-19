@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"go-harness/internal/config"
 	"go-harness/internal/domain"
 )
 
@@ -120,6 +121,18 @@ func appendCodingReviewNotesGuidance(prompt string, workspace domain.Workspace) 
 			"- If `.harness/review-notes.md` exists in the workspace, read it before making changes.\n"+
 			"- Treat the blocking issues in that file as required work for this issue.\n",
 	)
+}
+
+func appendGitHubPRGuidance(prompt string, cfg config.GitHubConfig) string {
+	return strings.TrimSpace(prompt) + "\n\n" + strings.TrimSpace(fmt.Sprintf(
+		"GitHub handoff:\n\n"+
+			"- Leave the workspace on a clean git state before the run ends.\n"+
+			"- Commit the final code changes on the issue branch so the harness can push it.\n"+
+			"- The harness will create or reuse the GitHub pull request against %s/%s on branch %s when the issue moves to done.\n",
+		cfg.Owner,
+		cfg.Repo,
+		cfg.BaseBranch,
+	))
 }
 
 func appendReviewPromptContract(prompt string, workspace domain.Workspace) string {

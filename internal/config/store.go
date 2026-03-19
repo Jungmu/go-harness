@@ -17,6 +17,7 @@ import (
 
 const (
 	defaultLinearEndpoint  = "https://api.linear.app/graphql"
+	defaultGitHubEndpoint  = "https://api.github.com"
 	defaultPollingInterval = 30 * time.Second
 	defaultHooksTimeout    = 60 * time.Second
 	defaultMaxConcurrent   = 10
@@ -56,6 +57,7 @@ type RuntimeConfig struct {
 	PromptTemplate string
 	Environment    EnvironmentConfig
 	Tracker        TrackerConfig
+	GitHub         GitHubConfig
 	Polling        PollingConfig
 	Workspace      WorkspaceConfig
 	Hooks          HooksConfig
@@ -74,6 +76,16 @@ type TrackerConfig struct {
 	TerminalStates   []string
 	activeStateSet   map[string]struct{}
 	terminalStateSet map[string]struct{}
+}
+
+type GitHubConfig struct {
+	Endpoint         string
+	Token            string
+	Owner            string
+	Repo             string
+	BaseBranch       string
+	RemoteURL        string
+	DraftPullRequest bool
 }
 
 type PollingConfig struct {
@@ -313,6 +325,22 @@ func applyConfig(cfg *RuntimeConfig, raw map[string]any, env envResolver) error 
 		}
 	}
 
+	if githubMap := mapValue(raw, "github"); githubMap != nil {
+		cfg.GitHub.Endpoint = resolveEnvReference(stringValue(githubMap, "endpoint", cfg.GitHub.Endpoint), env)
+		cfg.GitHub.Token = resolveSecret(stringValue(githubMap, "token", cfg.GitHub.Token), env)
+		cfg.GitHub.Owner = resolveEnvReference(stringValue(githubMap, "owner", cfg.GitHub.Owner), env)
+		cfg.GitHub.Repo = resolveEnvReference(stringValue(githubMap, "repo", cfg.GitHub.Repo), env)
+		cfg.GitHub.BaseBranch = resolveEnvReference(stringValue(githubMap, "base_branch", cfg.GitHub.BaseBranch), env)
+		cfg.GitHub.RemoteURL = resolveEnvReference(stringValue(githubMap, "remote_url", cfg.GitHub.RemoteURL), env)
+		if rawDraftPullRequest, ok := githubMap["draft_pull_request"]; ok {
+			draftPullRequest, ok := rawDraftPullRequest.(bool)
+			if !ok {
+				return &ValidationError{Field: "github.draft_pull_request", Message: "must be a boolean"}
+			}
+			cfg.GitHub.DraftPullRequest = draftPullRequest
+		}
+	}
+
 	if pollingMap := mapValue(raw, "polling"); pollingMap != nil {
 		if value, ok := intValue(pollingMap, "interval_ms"); ok {
 			cfg.Polling.Interval = time.Duration(value) * time.Millisecond
@@ -405,6 +433,18 @@ func validateAndNormalize(cfg *RuntimeConfig, env envResolver) error {
 	}
 	if strings.TrimSpace(cfg.Tracker.ProjectSlug) == "" {
 		return &ValidationError{Field: "tracker.project_slug", Message: "is required"}
+	}
+	if strings.TrimSpace(cfg.GitHub.Endpoint) == "" {
+		return &ValidationError{Field: "github.endpoint", Message: "must not be empty"}
+	}
+	if strings.TrimSpace(cfg.GitHub.Owner) == "" {
+		return &ValidationError{Field: "github.owner", Message: "is required"}
+	}
+	if strings.TrimSpace(cfg.GitHub.Repo) == "" {
+		return &ValidationError{Field: "github.repo", Message: "is required"}
+	}
+	if strings.TrimSpace(cfg.GitHub.BaseBranch) == "" {
+		return &ValidationError{Field: "github.base_branch", Message: "is required"}
 	}
 	if cfg.Polling.Interval <= 0 {
 		return &ValidationError{Field: "polling.interval_ms", Message: "must be positive"}
@@ -513,6 +553,21 @@ func ValidateReviewWorkflow(mainCfg, reviewCfg RuntimeConfig) error {
 	if !strings.EqualFold(strings.TrimSpace(reviewCfg.Tracker.Kind), "linear") {
 		return fmt.Errorf("review workflow must use tracker.kind=linear")
 	}
+	if strings.TrimSpace(reviewCfg.GitHub.Endpoint) != strings.TrimSpace(mainCfg.GitHub.Endpoint) {
+		return fmt.Errorf("review workflow github.endpoint must match main workflow")
+	}
+	if strings.TrimSpace(reviewCfg.GitHub.Owner) != strings.TrimSpace(mainCfg.GitHub.Owner) {
+		return fmt.Errorf("review workflow github.owner must match main workflow")
+	}
+	if strings.TrimSpace(reviewCfg.GitHub.Repo) != strings.TrimSpace(mainCfg.GitHub.Repo) {
+		return fmt.Errorf("review workflow github.repo must match main workflow")
+	}
+	if strings.TrimSpace(reviewCfg.GitHub.BaseBranch) != strings.TrimSpace(mainCfg.GitHub.BaseBranch) {
+		return fmt.Errorf("review workflow github.base_branch must match main workflow")
+	}
+	if strings.TrimSpace(reviewCfg.GitHub.RemoteURL) != strings.TrimSpace(mainCfg.GitHub.RemoteURL) {
+		return fmt.Errorf("review workflow github.remote_url must match main workflow")
+	}
 	if strings.TrimSpace(reviewCfg.Tracker.ProjectSlug) != strings.TrimSpace(mainCfg.Tracker.ProjectSlug) {
 		return fmt.Errorf("review workflow tracker.project_slug must match main workflow")
 	}
@@ -577,6 +632,9 @@ func (s *Store) loadConfig(path, envPath string) (RuntimeConfig, time.Time, file
 			Endpoint:       defaultLinearEndpoint,
 			ActiveStates:   append([]string{}, defaultActiveStates...),
 			TerminalStates: append([]string{}, defaultTerminalStates...),
+		},
+		GitHub: GitHubConfig{
+			Endpoint: defaultGitHubEndpoint,
 		},
 		Polling: PollingConfig{Interval: defaultPollingInterval},
 		Workspace: WorkspaceConfig{

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"go-harness/internal/config"
+	gh "go-harness/internal/github"
 	"go-harness/internal/orchestrator"
 	"go-harness/internal/server"
 	"go-harness/internal/workflow"
@@ -64,11 +65,16 @@ func runDaemon(args []string) int {
 		cfg.Server.Port = port
 	}
 
+	rootCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+
+	githubAuthorizer := gh.NewAuthorizer(logger.With("component", "github_auth"))
 	trackerClient := &dynamicTracker{store: store, httpClient: http.DefaultClient}
 	workspaceManager := &dynamicWorkspaceManager{store: store, logger: codingLogger}
 	runner := &dynamicRunner{store: store, logger: codingLogger}
+	pullRequests := &dynamicPullRequestCreator{store: store, httpClient: http.DefaultClient, authorizer: githubAuthorizer}
 	configSource := &loggingConfigSource{store: store, levelVar: &codingLevelVar}
-	orch := orchestrator.New(cfg, trackerClient, workspaceManager, runner, codingLogger, orchestrator.WithConfigSource(configSource), orchestrator.WithWorkerName("coding"))
+	orch := orchestrator.New(cfg, trackerClient, workspaceManager, runner, codingLogger, orchestrator.WithConfigSource(configSource), orchestrator.WithWorkerName("coding"), orchestrator.WithPullRequestCreator(pullRequests))
 
 	var reviewOrch *orchestrator.Orchestrator
 	reviewPath, foundReview, err := config.ResolveSiblingWorkflowPath(cfg.SourcePath, config.ReviewWorkflowFilename)
@@ -92,12 +98,22 @@ func runDaemon(args []string) int {
 		reviewTracker := &dynamicTracker{store: reviewStore, httpClient: http.DefaultClient}
 		reviewWorkspaceManager := &dynamicWorkspaceManager{store: reviewStore, logger: reviewLogger}
 		reviewRunner := &dynamicRunner{store: reviewStore, logger: reviewLogger}
+		reviewPullRequests := &dynamicPullRequestCreator{store: reviewStore, httpClient: http.DefaultClient, authorizer: githubAuthorizer}
 		reviewConfigSource := &loggingConfigSource{store: reviewStore, levelVar: &reviewLevelVar}
-		reviewOrch = orchestrator.New(reviewCfg, reviewTracker, reviewWorkspaceManager, reviewRunner, reviewLogger, orchestrator.WithConfigSource(reviewConfigSource), orchestrator.WithReviewMode())
+		reviewOrch = orchestrator.New(reviewCfg, reviewTracker, reviewWorkspaceManager, reviewRunner, reviewLogger, orchestrator.WithConfigSource(reviewConfigSource), orchestrator.WithReviewMode(), orchestrator.WithPullRequestCreator(reviewPullRequests))
+		if err := reviewPullRequests.Warmup(rootCtx); err != nil {
+			logger.Error("failed to authorize github for review workflow", slog.Any("error", err))
+			return 1
+		}
 		logStartupConfiguration(reviewLogger, reviewCfg)
 		logger.Info("review workflow enabled", slog.String("review_workflow_path", reviewCfg.SourcePath), slog.String("workflow_dir", filepath.Dir(reviewCfg.SourcePath)))
 	} else {
 		logger.Info("review workflow disabled", slog.String("expected_path", filepath.Join(filepath.Dir(cfg.SourcePath), config.ReviewWorkflowFilename)))
+	}
+
+	if err := pullRequests.Warmup(rootCtx); err != nil {
+		logger.Error("failed to authorize github", slog.Any("error", err))
+		return 1
 	}
 
 	runtime := &runtimeSurface{
@@ -110,9 +126,6 @@ func runDaemon(args []string) int {
 		runtime.reviewIssueSnapshot = reviewOrch.IssueSnapshot
 		runtime.reviewRefresh = reviewOrch.TriggerRefresh
 	}
-
-	rootCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stopSignals()
 
 	if err := orch.Start(rootCtx); err != nil {
 		logger.Error("failed to start orchestrator", slog.Any("error", err))

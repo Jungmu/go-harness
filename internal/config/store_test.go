@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,13 +138,49 @@ func assertSameFile(t *testing.T, gotPath, wantPath string) {
 	}
 }
 
+func withRequiredGitHubWorkflow(t *testing.T, content string) string {
+	t.Helper()
+
+	t.Setenv("GITHUB_TOKEN", "github-token")
+	block := "github:\n  token: $GITHUB_TOKEN\n  owner: acme\n  repo: widgets\n  base_branch: main\n"
+	if strings.Contains(content, "\ngithub:") {
+		return content
+	}
+	if marker := "\npolling:"; strings.Contains(content, marker) {
+		return strings.Replace(content, marker, "\n"+block+"polling:", 1)
+	}
+	if marker := "\nworkspace:"; strings.Contains(content, marker) {
+		return strings.Replace(content, marker, "\n"+block+"workspace:", 1)
+	}
+	if marker := "\nlogging:"; strings.Contains(content, marker) {
+		return strings.Replace(content, marker, "\n"+block+"logging:", 1)
+	}
+	if marker := "\n---\n"; strings.Contains(content, marker) {
+		return strings.Replace(content, marker, "\n"+block+"---\n", 1)
+	}
+	t.Fatalf("workflow content missing a front matter insertion point:\n%s", content)
+	return ""
+}
+
+func environmentEntryByName(t *testing.T, entries []EnvironmentEntry, name string) EnvironmentEntry {
+	t.Helper()
+
+	for _, entry := range entries {
+		if entry.Name == name {
+			return entry
+		}
+	}
+	t.Fatalf("environment entry %q not found in %#v", name, entries)
+	return EnvironmentEntry{}
+}
+
 func TestStoreLoadAndValidateAppliesDefaultsAndEnvResolution(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("LINEAR_API_KEY", "linear-token")
 	t.Setenv("WORKSPACE_ROOT", filepath.Join(root, "workspaces"))
 
 	path := filepath.Join(root, "WORKFLOW.md")
-	content := `---
+	content := withRequiredGitHubWorkflow(t, `---
 tracker:
   kind: linear
   api_key: $LINEAR_API_KEY
@@ -155,7 +192,7 @@ agent:
     In Progress: 2
 ---
 Handle {{ issue.identifier }}
-`
+`)
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +233,7 @@ func TestStoreLoadAndValidateReadsDotEnvFromExecutableDirectory(t *testing.T) {
 	withExecutableDotEnv(t, "LINEAR_API_KEY=dotenv-token\nWORKSPACE_ROOT="+filepath.Join(root, "dotenv-workspaces")+"\n")
 
 	path := filepath.Join(root, "WORKFLOW.md")
-	content := `---
+	content := withRequiredGitHubWorkflow(t, `---
 tracker:
   kind: linear
   api_key: $LINEAR_API_KEY
@@ -205,7 +242,7 @@ workspace:
   root: $WORKSPACE_ROOT
 ---
 Handle {{ issue.identifier }}
-`
+`)
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -227,8 +264,8 @@ Handle {{ issue.identifier }}
 	if cfg.Environment.DotEnvPath == "" {
 		t.Fatal("Environment.DotEnvPath = empty, want executable .env path")
 	}
-	if len(cfg.Environment.Entries) != 2 {
-		t.Fatalf("Environment.Entries = %#v, want 2 tracked entries", cfg.Environment.Entries)
+	if len(cfg.Environment.Entries) != 3 {
+		t.Fatalf("Environment.Entries = %#v, want 3 tracked entries", cfg.Environment.Entries)
 	}
 }
 
@@ -239,7 +276,7 @@ func TestStoreLoadAndValidatePrefersProcessEnvOverDotEnv(t *testing.T) {
 	withExecutableDotEnv(t, "LINEAR_API_KEY=dotenv-token\nWORKSPACE_ROOT="+filepath.Join(root, "dotenv-workspaces")+"\n")
 
 	path := filepath.Join(root, "WORKFLOW.md")
-	content := `---
+	content := withRequiredGitHubWorkflow(t, `---
 tracker:
   kind: linear
   api_key: $LINEAR_API_KEY
@@ -248,7 +285,7 @@ workspace:
   root: $WORKSPACE_ROOT
 ---
 Handle {{ issue.identifier }}
-`
+`)
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -264,11 +301,17 @@ Handle {{ issue.identifier }}
 	if cfg.Workspace.Root != filepath.Join(root, "process-workspaces") {
 		t.Fatalf("Workspace.Root = %q, want %q", cfg.Workspace.Root, filepath.Join(root, "process-workspaces"))
 	}
-	if cfg.Environment.Entries[0].Name != "LINEAR_API_KEY" || cfg.Environment.Entries[0].Source != "process" || cfg.Environment.Entries[0].Value != "<redacted>" {
-		t.Fatalf("Environment entry for LINEAR_API_KEY = %#v", cfg.Environment.Entries[0])
+	githubEntry := environmentEntryByName(t, cfg.Environment.Entries, "GITHUB_TOKEN")
+	if githubEntry.Source != "process" || githubEntry.Value != "<redacted>" {
+		t.Fatalf("Environment entry for GITHUB_TOKEN = %#v", githubEntry)
 	}
-	if cfg.Environment.Entries[1].Name != "WORKSPACE_ROOT" || cfg.Environment.Entries[1].Source != "process" || cfg.Environment.Entries[1].Value != filepath.Join(root, "process-workspaces") {
-		t.Fatalf("Environment entry for WORKSPACE_ROOT = %#v", cfg.Environment.Entries[1])
+	linearEntry := environmentEntryByName(t, cfg.Environment.Entries, "LINEAR_API_KEY")
+	if linearEntry.Source != "process" || linearEntry.Value != "<redacted>" {
+		t.Fatalf("Environment entry for LINEAR_API_KEY = %#v", linearEntry)
+	}
+	workspaceEntry := environmentEntryByName(t, cfg.Environment.Entries, "WORKSPACE_ROOT")
+	if workspaceEntry.Source != "process" || workspaceEntry.Value != filepath.Join(root, "process-workspaces") {
+		t.Fatalf("Environment entry for WORKSPACE_ROOT = %#v", workspaceEntry)
 	}
 }
 
@@ -279,7 +322,7 @@ func TestStoreLoadAndValidateTracksDotEnvEntriesWithRedaction(t *testing.T) {
 	withExecutableDotEnv(t, "LINEAR_API_KEY=dotenv-token\nWORKSPACE_ROOT="+filepath.Join(root, "dotenv-workspaces")+"\nUNUSED_FLAG=1\n")
 
 	path := filepath.Join(root, "WORKFLOW.md")
-	content := `---
+	content := withRequiredGitHubWorkflow(t, `---
 tracker:
   kind: linear
   api_key: $LINEAR_API_KEY
@@ -288,7 +331,7 @@ workspace:
   root: $WORKSPACE_ROOT
 ---
 Handle {{ issue.identifier }}
-`
+`)
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -298,17 +341,24 @@ Handle {{ issue.identifier }}
 		t.Fatalf("LoadAndValidate() error = %v", err)
 	}
 
-	if len(cfg.Environment.Entries) != 3 {
-		t.Fatalf("Environment.Entries = %#v, want 3 entries including unused .env key", cfg.Environment.Entries)
+	if len(cfg.Environment.Entries) != 4 {
+		t.Fatalf("Environment.Entries = %#v, want 4 entries including github token and unused .env key", cfg.Environment.Entries)
 	}
-	if cfg.Environment.Entries[0].Name != "LINEAR_API_KEY" || cfg.Environment.Entries[0].Value != "<redacted>" || cfg.Environment.Entries[0].Source != ".env" {
-		t.Fatalf("LINEAR_API_KEY entry = %#v", cfg.Environment.Entries[0])
+	githubEntry := environmentEntryByName(t, cfg.Environment.Entries, "GITHUB_TOKEN")
+	if githubEntry.Value != "<redacted>" || githubEntry.Source != "process" {
+		t.Fatalf("GITHUB_TOKEN entry = %#v", githubEntry)
 	}
-	if cfg.Environment.Entries[1].Name != "UNUSED_FLAG" || cfg.Environment.Entries[1].Value != "1" || cfg.Environment.Entries[1].Source != ".env" {
-		t.Fatalf("UNUSED_FLAG entry = %#v", cfg.Environment.Entries[1])
+	linearEntry := environmentEntryByName(t, cfg.Environment.Entries, "LINEAR_API_KEY")
+	if linearEntry.Value != "<redacted>" || linearEntry.Source != ".env" {
+		t.Fatalf("LINEAR_API_KEY entry = %#v", linearEntry)
 	}
-	if cfg.Environment.Entries[2].Name != "WORKSPACE_ROOT" || cfg.Environment.Entries[2].Value != filepath.Join(root, "dotenv-workspaces") || cfg.Environment.Entries[2].Source != ".env" {
-		t.Fatalf("WORKSPACE_ROOT entry = %#v", cfg.Environment.Entries[2])
+	unusedEntry := environmentEntryByName(t, cfg.Environment.Entries, "UNUSED_FLAG")
+	if unusedEntry.Value != "1" || unusedEntry.Source != ".env" {
+		t.Fatalf("UNUSED_FLAG entry = %#v", unusedEntry)
+	}
+	workspaceEntry := environmentEntryByName(t, cfg.Environment.Entries, "WORKSPACE_ROOT")
+	if workspaceEntry.Value != filepath.Join(root, "dotenv-workspaces") || workspaceEntry.Source != ".env" {
+		t.Fatalf("WORKSPACE_ROOT entry = %#v", workspaceEntry)
 	}
 }
 
@@ -319,14 +369,14 @@ func TestStoreLoadAndValidateResolvesProjectSlugFromEnv(t *testing.T) {
 	withExecutableDotEnv(t, "LINEAR_API_KEY=dotenv-token\nPROJECT_SLUG=improve-harness\n")
 
 	path := filepath.Join(root, "WORKFLOW.md")
-	content := `---
+	content := withRequiredGitHubWorkflow(t, `---
 tracker:
   kind: linear
   api_key: $LINEAR_API_KEY
   project_slug: $PROJECT_SLUG
 ---
 Handle {{ issue.identifier }}
-`
+`)
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -345,13 +395,13 @@ func TestStoreLoadAndValidateRejectsMissingProjectSlug(t *testing.T) {
 	t.Setenv("LINEAR_API_KEY", "linear-token")
 
 	path := filepath.Join(root, "WORKFLOW.md")
-	content := `---
+	content := withRequiredGitHubWorkflow(t, `---
 tracker:
   kind: linear
   api_key: $LINEAR_API_KEY
 ---
 Prompt
-`
+`)
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +420,7 @@ Prompt
 	}
 }
 
-func TestStoreLoadAndValidateRejectsInvalidLoggingLevel(t *testing.T) {
+func TestStoreLoadAndValidateAllowsMissingGitHubToken(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("LINEAR_API_KEY", "linear-token")
 
@@ -380,11 +430,41 @@ tracker:
   kind: linear
   api_key: $LINEAR_API_KEY
   project_slug: TEST
+github:
+  owner: acme
+  repo: widgets
+  base_branch: main
+---
+Prompt
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := NewStore(workflow.NewLoader()).LoadAndValidate(path)
+	if err != nil {
+		t.Fatalf("LoadAndValidate() error = %v", err)
+	}
+	if cfg.GitHub.Token != "" {
+		t.Fatalf("GitHub.Token = %q, want empty when not configured", cfg.GitHub.Token)
+	}
+}
+
+func TestStoreLoadAndValidateRejectsInvalidLoggingLevel(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("LINEAR_API_KEY", "linear-token")
+
+	path := filepath.Join(root, "WORKFLOW.md")
+	content := withRequiredGitHubWorkflow(t, `---
+tracker:
+  kind: linear
+  api_key: $LINEAR_API_KEY
+  project_slug: TEST
 logging:
   level: verbose
 ---
 Prompt
-`
+`)
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -403,7 +483,7 @@ Prompt
 	}
 }
 
-func TestStoreLoadAndValidateRejectsNonBooleanCapturePrompts(t *testing.T) {
+func TestStoreLoadAndValidateRejectsNonBooleanDraftPullRequest(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("LINEAR_API_KEY", "linear-token")
 
@@ -413,11 +493,48 @@ tracker:
   kind: linear
   api_key: $LINEAR_API_KEY
   project_slug: TEST
+github:
+  token: literal-token
+  owner: acme
+  repo: widgets
+  base_branch: main
+  draft_pull_request: yes
+---
+Prompt
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := NewStore(workflow.NewLoader()).LoadAndValidate(path)
+	if err == nil {
+		t.Fatal("LoadAndValidate() error = nil, want error")
+	}
+
+	var validationErr *ValidationError
+	if !errors.As(err, &validationErr) {
+		t.Fatalf("error type = %T, want *ValidationError", err)
+	}
+	if validationErr.Field != "github.draft_pull_request" {
+		t.Fatalf("ValidationError.Field = %q, want github.draft_pull_request", validationErr.Field)
+	}
+}
+
+func TestStoreLoadAndValidateRejectsNonBooleanCapturePrompts(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("LINEAR_API_KEY", "linear-token")
+
+	path := filepath.Join(root, "WORKFLOW.md")
+	content := withRequiredGitHubWorkflow(t, `---
+tracker:
+  kind: linear
+  api_key: $LINEAR_API_KEY
+  project_slug: TEST
 logging:
   capture_prompts: verbose
 ---
 Prompt
-`
+`)
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -440,14 +557,14 @@ func TestStoreLoadAndValidateUsesExecutableWorkflowWhenCWDDefaultIsMissing(t *te
 	root := t.TempDir()
 	withWorkingDir(t, root)
 
-	workflowPath := withExecutableWorkflow(t, `---
+	workflowPath := withExecutableWorkflow(t, withRequiredGitHubWorkflow(t, `---
 tracker:
   kind: linear
   api_key: executable-token
   project_slug: EXECUTABLE
 ---
 Prompt
-`)
+`))
 
 	cfg, err := NewStore(workflow.NewLoader()).LoadAndValidate("")
 	if err != nil {
@@ -463,24 +580,24 @@ Prompt
 func TestStoreLoadAndValidatePrefersCWDWorkflowOverExecutableWorkflow(t *testing.T) {
 	root := t.TempDir()
 	withWorkingDir(t, root)
-	withExecutableWorkflow(t, `---
+	withExecutableWorkflow(t, withRequiredGitHubWorkflow(t, `---
 tracker:
   kind: linear
   api_key: executable-token
   project_slug: EXECUTABLE
 ---
 Executable prompt
-`)
+`))
 
 	cwdWorkflowPath := filepath.Join(root, "WORKFLOW.md")
-	if err := os.WriteFile(cwdWorkflowPath, []byte(`---
+	if err := os.WriteFile(cwdWorkflowPath, []byte(withRequiredGitHubWorkflow(t, `---
 tracker:
   kind: linear
   api_key: cwd-token
   project_slug: CWD
 ---
 Cwd prompt
-`), 0o644); err != nil {
+`)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -518,6 +635,13 @@ func TestResolveSiblingWorkflowPathFindsReviewWorkflow(t *testing.T) {
 
 func TestValidateReviewWorkflowRejectsMismatchedSettings(t *testing.T) {
 	mainCfg := RuntimeConfig{
+		GitHub: GitHubConfig{
+			Endpoint:   "https://api.github.com",
+			Token:      "token-1",
+			Owner:      "acme",
+			Repo:       "widgets",
+			BaseBranch: "main",
+		},
 		Tracker: TrackerConfig{
 			Kind:           "linear",
 			ProjectSlug:    "MAIN",
@@ -527,6 +651,13 @@ func TestValidateReviewWorkflowRejectsMismatchedSettings(t *testing.T) {
 		Workspace: WorkspaceConfig{Root: "/tmp/main"},
 	}
 	reviewCfg := RuntimeConfig{
+		GitHub: GitHubConfig{
+			Endpoint:   "https://api.github.com",
+			Token:      "token-2",
+			Owner:      "other",
+			Repo:       "widgets",
+			BaseBranch: "main",
+		},
 		Tracker: TrackerConfig{
 			Kind:           "linear",
 			ProjectSlug:    "OTHER",
@@ -542,6 +673,7 @@ func TestValidateReviewWorkflowRejectsMismatchedSettings(t *testing.T) {
 
 	reviewCfg.Tracker.ProjectSlug = "MAIN"
 	reviewCfg.Workspace.Root = "/tmp/main"
+	reviewCfg.GitHub.Owner = "acme"
 	reviewCfg.Tracker.ActiveStates = []string{"In Review"}
 	reviewCfg.Tracker.TerminalStates = []string{"Closed", "Done"}
 	if err := ValidateReviewWorkflow(mainCfg, reviewCfg); err != nil {
@@ -554,14 +686,14 @@ func TestStoreReloadIfChangedRunsValidatorWithoutFileChange(t *testing.T) {
 	t.Setenv("LINEAR_API_KEY", "linear-token")
 
 	path := filepath.Join(root, "WORKFLOW.md")
-	content := `---
+	content := withRequiredGitHubWorkflow(t, `---
 tracker:
   kind: linear
   api_key: $LINEAR_API_KEY
   project_slug: TEST
 ---
 Prompt
-`
+`)
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -605,7 +737,7 @@ func TestStoreReloadIfChangedKeepsLastKnownGoodOnInvalidConfig(t *testing.T) {
 	t.Setenv("LINEAR_API_KEY", "linear-token")
 
 	path := filepath.Join(root, "WORKFLOW.md")
-	valid := `---
+	valid := withRequiredGitHubWorkflow(t, `---
 tracker:
   kind: linear
   api_key: $LINEAR_API_KEY
@@ -614,7 +746,7 @@ polling:
   interval_ms: 25
 ---
 Prompt
-`
+`)
 	if err := os.WriteFile(path, []byte(valid), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -626,13 +758,13 @@ Prompt
 	}
 
 	time.Sleep(20 * time.Millisecond)
-	invalid := `---
+	invalid := withRequiredGitHubWorkflow(t, `---
 tracker:
   kind: linear
   api_key: $LINEAR_API_KEY
 ---
 Prompt
-`
+`)
 	if err := os.WriteFile(path, []byte(invalid), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -652,7 +784,7 @@ Prompt
 	}
 
 	time.Sleep(20 * time.Millisecond)
-	validAgain := `---
+	validAgain := withRequiredGitHubWorkflow(t, `---
 tracker:
   kind: linear
   api_key: $LINEAR_API_KEY
@@ -664,7 +796,7 @@ logging:
   capture_prompts: true
 ---
 Prompt v2
-`
+`)
 	if err := os.WriteFile(path, []byte(validAgain), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -698,14 +830,14 @@ func TestStoreReloadIfChangedReloadsWhenExecutableDotEnvChanges(t *testing.T) {
 	withUnsetEnv(t, "LINEAR_API_KEY")
 
 	path := filepath.Join(root, "WORKFLOW.md")
-	content := `---
+	content := withRequiredGitHubWorkflow(t, `---
 tracker:
   kind: linear
   api_key: $LINEAR_API_KEY
   project_slug: TEST
 ---
 Prompt
-`
+`)
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}

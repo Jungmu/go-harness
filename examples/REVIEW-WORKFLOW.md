@@ -12,6 +12,15 @@ tracker:
     - Canceled
     - Duplicate
 
+github:
+  # Accepts GitHub web or API URLs, for example https://github.com/ or https://github.krafton.com/
+  endpoint: https://github.com/
+  # Optional when `gh auth login --hostname github.com` is already configured.
+  token: $GITHUB_TOKEN
+  owner: your-org
+  repo: your-repo
+  base_branch: main
+
 polling:
   interval_ms: 30000
 

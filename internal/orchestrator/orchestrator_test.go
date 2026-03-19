@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -51,7 +52,7 @@ func TestOrchestratorMovesIssueToInProgressThenDone(t *testing.T) {
 		},
 	}
 
-	orch := New(cfg, tracker, workspaceManager, runner, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	orch := newTestOrchestrator(cfg, tracker, workspaceManager, runner)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := orch.Start(ctx); err != nil {
@@ -87,10 +88,60 @@ func TestOrchestratorMovesIssueToInProgressThenDone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(%q) error = %v", historyPath, err)
 	}
-	for _, expected := range []string{"issue_claimed", "workspace_prepared", "tracker_state_transition", "issue_completed"} {
+	for _, expected := range []string{"issue_claimed", "workspace_prepared", "tracker_state_transition", "github_pull_request_ready", "issue_completed"} {
 		if !strings.Contains(string(data), expected) {
 			t.Fatalf("history file missing %q: %s", expected, string(data))
 		}
+	}
+}
+
+func TestOrchestratorRetriesWhenPullRequestCreationFails(t *testing.T) {
+	cfg := loadTestConfig(t)
+	issue := domain.Issue{ID: "1", Identifier: "ABC-1", Title: "Example", State: "Todo", BranchName: "feature/ABC-1"}
+
+	tracker := &fakeTracker{
+		pollCandidates: func() []domain.Issue { return []domain.Issue{issue} },
+		fetchByIDs:     func(_ []string) []domain.Issue { return []domain.Issue{issue} },
+		transitionState: func(issue domain.Issue, stateName string) (domain.Issue, error) {
+			issue.State = stateName
+			return issue, nil
+		},
+	}
+	workspaceManager := &fakeWorkspaceManager{root: cfg.Workspace.Root}
+	runner := &fakeRunner{
+		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
+			return codex.RunResult{
+				Session:        domain.LiveSession{SessionID: "thread-1-turn-1", ThreadID: "thread-1", TurnID: "turn-1"},
+				RefreshedIssue: &issue,
+			}, nil
+		},
+	}
+
+	orch := newTestOrchestrator(cfg, tracker, workspaceManager, runner, WithPullRequestCreator(&fakePullRequestCreator{
+		ensure: func(context.Context, domain.Issue, domain.Workspace) (domain.PullRequest, error) {
+			return domain.PullRequest{}, errors.New("push failed")
+		},
+	}))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := orch.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer func() {
+		_ = orch.Stop(context.Background())
+	}()
+
+	waitFor(t, func() bool {
+		snapshot := orch.Snapshot()
+		return snapshot.Counts.Retrying == 1 && containsTimelineEvent(snapshot.RecentActivity, "ABC-1", "github_pull_request_failed")
+	})
+
+	snapshot := orch.Snapshot()
+	if len(snapshot.Completed) != 0 {
+		t.Fatalf("completed = %#v, want empty", snapshot.Completed)
+	}
+	if !containsTimelineEvent(snapshot.RecentActivity, "ABC-1", "attempt_failed") {
+		t.Fatalf("recent activity missing attempt_failed: %#v", snapshot.RecentActivity)
 	}
 }
 
@@ -119,7 +170,7 @@ func TestOrchestratorCancelsTerminalIssueAndCleansWorkspace(t *testing.T) {
 		},
 	}
 
-	orch := New(cfg, tracker, workspaceManager, runner, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	orch := newTestOrchestrator(cfg, tracker, workspaceManager, runner)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := orch.Start(ctx); err != nil {
@@ -166,7 +217,7 @@ func TestOrchestratorHandsOffIssueToInReviewWhenMaxTurnsReached(t *testing.T) {
 		},
 	}
 
-	orch := New(cfg, tracker, workspaceManager, runner, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	orch := newTestOrchestrator(cfg, tracker, workspaceManager, runner)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := orch.Start(ctx); err != nil {
@@ -198,7 +249,7 @@ func TestOrchestratorHandsOffIssueToInReviewWhenMaxTurnsReached(t *testing.T) {
 
 func TestApplyWorkerExitPrefersSuccessfulHandoffOverNonActiveStopReason(t *testing.T) {
 	cfg := loadTestConfig(t)
-	orch := New(cfg, &fakeTracker{}, &fakeWorkspaceManager{root: cfg.Workspace.Root}, &fakeRunner{}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	orch := newTestOrchestrator(cfg, &fakeTracker{}, &fakeWorkspaceManager{root: cfg.Workspace.Root}, &fakeRunner{})
 
 	issue := domain.Issue{ID: "1", Identifier: "ABC-1", Title: "Example", State: "In Progress"}
 	workspace := domain.Workspace{WorkspaceKey: "ABC-1", Path: filepath.Join(cfg.Workspace.Root, "ABC-1")}
@@ -309,7 +360,7 @@ func TestOrchestratorContinuationStopsWithoutRetryWhenIssueTurnsTerminal(t *test
 		},
 	}
 
-	orch := New(cfg, tracker, workspaceManager, runner, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	orch := newTestOrchestrator(cfg, tracker, workspaceManager, runner)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := orch.Start(ctx); err != nil {
@@ -383,7 +434,7 @@ func TestReviewOrchestratorMovesIssueToDoneFromVerdict(t *testing.T) {
 		},
 	}
 
-	orch := New(cfg, tracker, workspaceManager, runner, slog.New(slog.NewTextHandler(os.Stderr, nil)), WithReviewMode())
+	orch := newTestOrchestrator(cfg, tracker, workspaceManager, runner, WithReviewMode())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := orch.Start(ctx); err != nil {
@@ -453,7 +504,7 @@ func TestReviewOrchestratorMovesIssueBackToTodoWithoutCleanup(t *testing.T) {
 		},
 	}
 
-	orch := New(cfg, tracker, workspaceManager, runner, slog.New(slog.NewTextHandler(os.Stderr, nil)), WithReviewMode())
+	orch := newTestOrchestrator(cfg, tracker, workspaceManager, runner, WithReviewMode())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := orch.Start(ctx); err != nil {
@@ -512,7 +563,7 @@ func TestReviewOrchestratorRetriesWhenVerdictMissingAndClearsStaleVerdict(t *tes
 		},
 	}
 
-	orch := New(cfg, tracker, workspaceManager, runner, slog.New(slog.NewTextHandler(os.Stderr, nil)), WithReviewMode())
+	orch := newTestOrchestrator(cfg, tracker, workspaceManager, runner, WithReviewMode())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := orch.Start(ctx); err != nil {
@@ -564,6 +615,9 @@ func TestCodingOrchestratorPromptMentionsReviewNotesWhenPresent(t *testing.T) {
 			if !strings.Contains(prompt, ".harness/review-notes.md") {
 				t.Fatalf("coding prompt missing review-notes guidance: %q", prompt)
 			}
+			if !strings.Contains(prompt, "GitHub handoff:") {
+				t.Fatalf("coding prompt missing github handoff guidance: %q", prompt)
+			}
 			return codex.RunResult{
 				Session:        domain.LiveSession{SessionID: "thread-1-turn-1", ThreadID: "thread-1", TurnID: "turn-1"},
 				RefreshedIssue: &domain.Issue{ID: "1", Identifier: "ABC-1", Title: "Example", State: "Done"},
@@ -571,7 +625,7 @@ func TestCodingOrchestratorPromptMentionsReviewNotesWhenPresent(t *testing.T) {
 		},
 	}
 
-	orch := New(cfg, tracker, workspaceManager, runner, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	orch := newTestOrchestrator(cfg, tracker, workspaceManager, runner)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := orch.Start(ctx); err != nil {
@@ -630,7 +684,7 @@ func TestOrchestratorReleasesMissingRunningIssueAndRecoversSlot(t *testing.T) {
 		},
 	}
 
-	orch := New(cfg, tracker, workspaceManager, runner, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	orch := newTestOrchestrator(cfg, tracker, workspaceManager, runner)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := orch.Start(ctx); err != nil {
@@ -660,7 +714,7 @@ func TestOrchestratorReleasesMissingRunningIssueAndRecoversSlot(t *testing.T) {
 
 func TestDispatchDueRetriesReleasesMissingIssue(t *testing.T) {
 	cfg := loadTestConfig(t)
-	orch := New(cfg, &fakeTracker{}, &fakeWorkspaceManager{root: cfg.Workspace.Root}, &fakeRunner{}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	orch := newTestOrchestrator(cfg, &fakeTracker{}, &fakeWorkspaceManager{root: cfg.Workspace.Root}, &fakeRunner{})
 	st := &state{
 		running: map[string]*runningTask{},
 		claimed: map[string]struct{}{
@@ -723,7 +777,7 @@ func TestSortDispatchCandidatesByPriorityThenCreatedAtThenIdentifier(t *testing.
 
 func TestIssueSnapshotReturnsPerIssueHistoryBeyondRecentActivityLimit(t *testing.T) {
 	cfg := loadTestConfig(t)
-	orch := New(cfg, &fakeTracker{}, &fakeWorkspaceManager{root: cfg.Workspace.Root}, &fakeRunner{}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	orch := newTestOrchestrator(cfg, &fakeTracker{}, &fakeWorkspaceManager{root: cfg.Workspace.Root}, &fakeRunner{})
 
 	history := make([]domain.TimelineEvent, 0, recentActivityLimit+5)
 	recent := make([]domain.TimelineEvent, 0, recentActivityLimit)
@@ -793,10 +847,10 @@ func TestOrchestratorStartupCleanupRemovesTerminalWorkspaceAndKeepsAuditFiles(t 
 		pollTerminalIssues: func() []domain.Issue { return []domain.Issue{{ID: "1", Identifier: "ABC-1", State: "Done"}} },
 	}
 	workspaceManager := &fakeWorkspaceManager{root: cfg.Workspace.Root}
-	orch := New(cfg, tracker, workspaceManager, &fakeRunner{run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
+	orch := newTestOrchestrator(cfg, tracker, workspaceManager, &fakeRunner{run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
 		t.Fatal("runner should not start")
 		return codex.RunResult{}, nil
-	}}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	}})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -828,10 +882,10 @@ func TestOrchestratorStartupCleanupContinuesOnTrackerFailure(t *testing.T) {
 		pollTerminalErr:    os.ErrPermission,
 	}
 
-	orch := New(cfg, tracker, &fakeWorkspaceManager{root: cfg.Workspace.Root}, &fakeRunner{run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
+	orch := newTestOrchestrator(cfg, tracker, &fakeWorkspaceManager{root: cfg.Workspace.Root}, &fakeRunner{run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
 		t.Fatal("runner should not start")
 		return codex.RunResult{}, nil
-	}}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	}})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -852,10 +906,10 @@ func TestOrchestratorStartupCleanupIgnoresMissingWorkspace(t *testing.T) {
 		pollTerminalIssues: func() []domain.Issue { return []domain.Issue{{ID: "1", Identifier: "ABC-404", State: "Done"}} },
 	}
 	workspaceManager := &fakeWorkspaceManager{root: cfg.Workspace.Root}
-	orch := New(cfg, tracker, workspaceManager, &fakeRunner{run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
+	orch := newTestOrchestrator(cfg, tracker, workspaceManager, &fakeRunner{run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
 		t.Fatal("runner should not start")
 		return codex.RunResult{}, nil
-	}}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	}})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -950,11 +1004,54 @@ func (f *fakeRunner) RunAttempt(ctx context.Context, issue domain.Issue, workspa
 	return f.run(ctx, issue, workspace, prompt, attempt, onEvent, continueFn)
 }
 
+type fakePullRequestCreator struct {
+	ensure func(context.Context, domain.Issue, domain.Workspace) (domain.PullRequest, error)
+}
+
+func (f *fakePullRequestCreator) EnsurePullRequest(ctx context.Context, issue domain.Issue, workspace domain.Workspace) (domain.PullRequest, error) {
+	if f.ensure != nil {
+		return f.ensure(ctx, issue, workspace)
+	}
+	headBranch := issue.BranchName
+	if strings.TrimSpace(headBranch) == "" {
+		headBranch = "feature/" + issue.Identifier
+	}
+	return domain.PullRequest{
+		Number:     1,
+		URL:        "https://github.example.com/acme/widgets/pull/1",
+		HeadBranch: headBranch,
+		BaseBranch: "main",
+		Created:    true,
+	}, nil
+}
+
+func newTestOrchestrator(cfg config.RuntimeConfig, tracker Tracker, workspaceManager WorkspaceManager, runner Runner, opts ...Option) *Orchestrator {
+	tail := append([]Option{
+		WithPullRequestCreator(&fakePullRequestCreator{
+			ensure: func(_ context.Context, issue domain.Issue, _ domain.Workspace) (domain.PullRequest, error) {
+				headBranch := strings.TrimSpace(issue.BranchName)
+				if headBranch == "" {
+					headBranch = "feature/" + issue.Identifier
+				}
+				return domain.PullRequest{
+					Number:     1,
+					URL:        "https://github.example.com/acme/widgets/pull/1",
+					HeadBranch: headBranch,
+					BaseBranch: cfg.GitHub.BaseBranch,
+					Created:    true,
+				}, nil
+			},
+		}),
+	}, opts...)
+	return New(cfg, tracker, workspaceManager, runner, slog.New(slog.NewTextHandler(os.Stderr, nil)), tail...)
+}
+
 func loadTestConfig(t *testing.T) config.RuntimeConfig {
 	t.Helper()
 
 	root := t.TempDir()
 	t.Setenv("LINEAR_API_KEY", "linear-token")
+	t.Setenv("GITHUB_TOKEN", "github-token")
 
 	content := `---
 tracker:
@@ -963,6 +1060,11 @@ tracker:
   project_slug: TEST
   active_states: ["Todo", "In Progress"]
   terminal_states: ["Done"]
+github:
+  token: $GITHUB_TOKEN
+  owner: acme
+  repo: widgets
+  base_branch: main
 polling:
   interval_ms: 20
 workspace:
@@ -994,6 +1096,7 @@ func loadReviewTestConfig(t *testing.T) config.RuntimeConfig {
 
 	root := t.TempDir()
 	t.Setenv("LINEAR_API_KEY", "linear-token")
+	t.Setenv("GITHUB_TOKEN", "github-token")
 
 	content := `---
 tracker:
@@ -1002,6 +1105,11 @@ tracker:
   project_slug: TEST
   active_states: ["In Review"]
   terminal_states: ["Done"]
+github:
+  token: $GITHUB_TOKEN
+  owner: acme
+  repo: widgets
+  base_branch: main
 polling:
   interval_ms: 20
 workspace:

@@ -51,6 +51,10 @@ type Runner interface {
 	RunAttempt(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error)
 }
 
+type PullRequestCreator interface {
+	EnsurePullRequest(ctx context.Context, issue domain.Issue, workspace domain.Workspace) (domain.PullRequest, error)
+}
+
 type ConfigSource interface {
 	Current() config.RuntimeConfig
 	ReloadIfChanged() (config.RuntimeConfig, bool, error)
@@ -64,6 +68,7 @@ type Orchestrator struct {
 	tracker    Tracker
 	workspaces WorkspaceManager
 	runner     Runner
+	pullReqs   PullRequestCreator
 	logger     *slog.Logger
 	configs    ConfigSource
 	lastBlock  string
@@ -158,6 +163,12 @@ func WithReviewMode() Option {
 		if strings.TrimSpace(orch.workerName) == "" {
 			orch.workerName = reviewWorkerName
 		}
+	}
+}
+
+func WithPullRequestCreator(creator PullRequestCreator) Option {
+	return func(orch *Orchestrator) {
+		orch.pullReqs = creator
 	}
 }
 
@@ -835,7 +846,7 @@ func (o *Orchestrator) executeAttempt(ctx context.Context, issue domain.Issue, a
 		err = afterRunErr
 	}
 	if err == nil {
-		completedIssue, stopReason, transitionErr := o.completeIssueIfNeeded(ctx, runIssue, workspace, result)
+		completedIssue, stopReason, transitionErr := o.completeIssueIfNeeded(ctx, runIssue, workspace, attempt, result)
 		if transitionErr != nil {
 			err = transitionErr
 		} else if completedIssue != nil {
@@ -867,7 +878,8 @@ func (o *Orchestrator) augmentPrompt(prompt string, workspace domain.Workspace) 
 	if o.reviewMode {
 		return appendReviewPromptContract(prompt, workspace)
 	}
-	return appendCodingReviewNotesGuidance(prompt, workspace)
+	prompt = appendCodingReviewNotesGuidance(prompt, workspace)
+	return appendGitHubPRGuidance(prompt, o.cfg.GitHub)
 }
 
 func (o *Orchestrator) transitionIssueState(ctx context.Context, issue domain.Issue, targetState, message string) (domain.Issue, error) {
@@ -912,7 +924,7 @@ func (o *Orchestrator) transitionIssueState(ctx context.Context, issue domain.Is
 	return transitioned, nil
 }
 
-func (o *Orchestrator) completeIssueIfNeeded(ctx context.Context, issue domain.Issue, workspace domain.Workspace, result codex.RunResult) (*domain.Issue, string, error) {
+func (o *Orchestrator) completeIssueIfNeeded(ctx context.Context, issue domain.Issue, workspace domain.Workspace, attempt int, result codex.RunResult) (*domain.Issue, string, error) {
 	if o.reviewMode {
 		verdict, err := loadReviewVerdict(workspace)
 		if err != nil {
@@ -920,6 +932,9 @@ func (o *Orchestrator) completeIssueIfNeeded(ctx context.Context, issue domain.I
 		}
 		switch verdict.Decision {
 		case reviewDecisionDone:
+			if _, err := o.ensurePullRequest(ctx, coalesceIssue(result.RefreshedIssue, issue), workspace, attempt); err != nil {
+				return nil, "", err
+			}
 			completed, err := o.transitionIssueState(ctx, coalesceIssue(result.RefreshedIssue, issue), doneStateName, "review accepted and issue moved to done")
 			if err != nil {
 				return nil, "", err
@@ -958,11 +973,78 @@ func (o *Orchestrator) completeIssueIfNeeded(ctx context.Context, issue domain.I
 		}
 	}
 
+	if _, err := o.ensurePullRequest(ctx, coalesceIssue(result.RefreshedIssue, issue), workspace, attempt); err != nil {
+		return nil, "", err
+	}
 	completed, err := o.transitionIssueState(ctx, coalesceIssue(result.RefreshedIssue, issue), doneStateName, "issue moved to done")
 	if err != nil {
 		return nil, "", err
 	}
 	return &completed, "", nil
+}
+
+func (o *Orchestrator) ensurePullRequest(ctx context.Context, issue domain.Issue, workspace domain.Workspace, attempt int) (domain.PullRequest, error) {
+	if o.pullReqs == nil {
+		return domain.PullRequest{}, fmt.Errorf("pull request creator is not configured")
+	}
+	pullRequest, err := o.pullReqs.EnsurePullRequest(ctx, issue, workspace)
+	if err != nil {
+		o.pushEvent(timelineUpdate{
+			IssueID:    issue.ID,
+			Identifier: issue.Identifier,
+			Workspace:  workspace,
+			Event: domain.TimelineEvent{
+				At:           time.Now().UTC(),
+				IssueID:      issue.ID,
+				Identifier:   issue.Identifier,
+				Attempt:      attempt,
+				Event:        "github_pull_request_failed",
+				Status:       "error",
+				Reason:       "github_pull_request_failed",
+				StateAfter:   issue.State,
+				WorkspaceKey: workspace.WorkspaceKey,
+				Workspace:    workspace.Path,
+				LastError:    err.Error(),
+				Message:      "github pull request creation failed before the issue could move to done",
+			},
+		})
+		return domain.PullRequest{}, err
+	}
+
+	message := "github pull request is ready"
+	if strings.TrimSpace(pullRequest.URL) != "" {
+		message = "github pull request is ready: " + pullRequest.URL
+	}
+	reason := "github_pull_request_reused"
+	if pullRequest.Created {
+		reason = "github_pull_request_created"
+	}
+	o.pushEvent(timelineUpdate{
+		IssueID:    issue.ID,
+		Identifier: issue.Identifier,
+		Workspace:  workspace,
+		Event: domain.TimelineEvent{
+			At:           time.Now().UTC(),
+			IssueID:      issue.ID,
+			Identifier:   issue.Identifier,
+			Attempt:      attempt,
+			Event:        "github_pull_request_ready",
+			Status:       "running",
+			Reason:       reason,
+			StateAfter:   issue.State,
+			WorkspaceKey: workspace.WorkspaceKey,
+			Workspace:    workspace.Path,
+			Message:      message,
+		},
+	})
+	o.logger.Info("github pull request ready",
+		slog.String("issue", issue.Identifier),
+		slog.Bool("created", pullRequest.Created),
+		slog.String("head_branch", pullRequest.HeadBranch),
+		slog.String("base_branch", pullRequest.BaseBranch),
+		slog.String("url", pullRequest.URL),
+	)
+	return pullRequest, nil
 }
 
 func (o *Orchestrator) applyWorkerEvent(st *state, event workerEvent) {

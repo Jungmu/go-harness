@@ -8,6 +8,7 @@ import (
 	"go-harness/internal/agent/codex"
 	"go-harness/internal/config"
 	"go-harness/internal/domain"
+	gh "go-harness/internal/github"
 	"go-harness/internal/tracker/linear"
 	"go-harness/internal/workspace"
 )
@@ -65,4 +66,25 @@ type dynamicRunner struct {
 func (d *dynamicRunner) RunAttempt(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
 	cfg := d.store.Current()
 	return codex.NewRunner(cfg.Codex, cfg.Logging, d.logger).RunAttempt(ctx, issue, workspace, prompt, attempt, onEvent, continueFn)
+}
+
+type dynamicPullRequestCreator struct {
+	store      *config.Store
+	httpClient *http.Client
+	authorizer *gh.Authorizer
+}
+
+func (d *dynamicPullRequestCreator) Warmup(ctx context.Context) error {
+	cfg := d.store.Current()
+	_, err := d.authorizer.ResolveConfig(ctx, cfg.GitHub)
+	return err
+}
+
+func (d *dynamicPullRequestCreator) EnsurePullRequest(ctx context.Context, issue domain.Issue, workspace domain.Workspace) (domain.PullRequest, error) {
+	cfg := d.store.Current()
+	resolved, err := d.authorizer.ResolveConfig(ctx, cfg.GitHub)
+	if err != nil {
+		return domain.PullRequest{}, err
+	}
+	return gh.NewClient(d.httpClient, resolved).EnsurePullRequest(ctx, issue, workspace)
 }

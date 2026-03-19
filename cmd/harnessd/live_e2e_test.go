@@ -333,6 +333,12 @@ tracker:
   terminal_states:
     - %q
 
+github:
+  token: live-e2e-token
+  owner: acme
+  repo: widgets
+  base_branch: main
+
 polling:
   interval_ms: 250
 

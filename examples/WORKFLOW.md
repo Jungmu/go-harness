@@ -13,6 +13,15 @@ tracker:
     - Canceled
     - Duplicate
 
+github:
+  # Accepts GitHub web or API URLs, for example https://github.com/ or https://github.krafton.com/
+  endpoint: https://github.com/
+  # Optional when `gh auth login --hostname github.com` is already configured.
+  token: $GITHUB_TOKEN
+  owner: your-org
+  repo: your-repo
+  base_branch: main
+
 polling:
   interval_ms: 30000
 
@@ -75,4 +84,5 @@ Requirements:
 - If `.harness/review-notes.md` exists, read it first and resolve every blocking issue it lists.
 - Use the issue context to make the smallest correct change.
 - Run focused verification for the files you touched.
-- Leave the workspace in a reviewable state for a human operator.
+- Commit the final changes on the issue branch before ending the run.
+- Leave the workspace in a clean git state so the harness can open the GitHub pull request when it moves the issue to `Done`.

@@ -27,6 +27,7 @@ If a sibling `REVIEW-WORKFLOW.md` exists next to the active `WORKFLOW.md`, the d
 ## Supported Front Matter Keys
 
 - `tracker`
+- `github`
 - `polling`
 - `workspace`
 - `hooks`
@@ -42,6 +43,8 @@ Unknown keys are ignored.
 - `tracker.endpoint = https://api.linear.app/graphql`
 - `tracker.active_states = ["Todo", "In Progress"]`
 - `tracker.terminal_states = ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
+- `github.endpoint = https://api.github.com`
+- `github.draft_pull_request = false`
 - `polling.interval_ms = 30000`
 - `workspace.root = <system-temp>/symphony_workspaces`
 - `hooks.timeout_ms = 60000`
@@ -62,11 +65,18 @@ Unknown keys are ignored.
 
 - `tracker.api_key` accepts a literal value or `$VAR_NAME`.
 - `tracker.project_slug` accepts a Linear project `slugId` or an exact project name.
+- `github.token` accepts a literal value or `$VAR_NAME`.
+- `github.owner`, `github.repo`, `github.base_branch`, `github.endpoint`, and `github.remote_url` accept literal values or `$VAR_NAME`.
 - `$VAR_NAME` resolves from the process environment first, then from `.env` in the executable directory.
 - `workspace.root` supports `~` expansion and `$VAR` expansion using the same environment lookup order.
 - `logging.level` accepts `debug`, `info`, `warn`, or `error`.
 - `logging.capture_prompts` accepts a boolean. Non-boolean values return `invalid logging.capture_prompts: must be a boolean`.
+- `github.draft_pull_request` accepts a boolean. Non-boolean values return `invalid github.draft_pull_request: must be a boolean`.
 - The shell command in `codex.command` is passed directly to `bash -lc`.
+- `github.endpoint` accepts GitHub web URLs and API URLs. Supported examples include `https://github.com/`, `https://api.github.com`, `https://github.krafton.com/`, and `https://github.krafton.com/api/v3`.
+- `github.token` is optional. If it is empty, daemon startup runs `gh auth token --hostname <host>` using the host derived from `github.endpoint`.
+- If GitHub CLI auth is missing for that host, startup fails and the operator must run `gh auth login --hostname <host>` or set `github.token`.
+- If `github.remote_url` is omitted, the runtime derives the push remote from `github.endpoint`, `github.owner`, and `github.repo`.
 - If no workflow path is passed and the current working directory has no `WORKFLOW.md`, the loader falls back to the executable directory before returning `missing_workflow_file`.
 
 ## Prompt Rendering
@@ -92,6 +102,7 @@ Unknown variables and filters return `workflow_template_render_error`.
 
 - `REVIEW-WORKFLOW.md` is optional and is discovered only as a sibling of the active `WORKFLOW.md`.
 - The review workflow must use `tracker.kind = linear`.
+- The review workflow must use the same `github.endpoint`, `github.owner`, `github.repo`, `github.base_branch`, and `github.remote_url` as the main workflow.
 - The review workflow must use the same `tracker.project_slug`, `workspace.root`, and `tracker.terminal_states` set as the main workflow.
 - The review workflow must use `tracker.active_states = ["In Review"]`.
 - An invalid `REVIEW-WORKFLOW.md` blocks daemon startup if the file exists.
@@ -116,15 +127,19 @@ Unknown variables and filters return `workflow_template_render_error`.
 ## Continuation Turns
 
 - On startup, the runtime fetches terminal issues for the configured project and removes matching workspace directories under `workspace.root`.
+- On startup, if `github.token` is absent, the runtime resolves a token with `gh auth token --hostname <host>` before starting the orchestrator.
 - Before the first turn starts, the runtime moves a claimed issue to `In Progress` if it is not already there.
 - The first turn prompt is rendered from the `WORKFLOW.md` body template.
 - If the issue is still active after `turn/completed`, the runner reuses the same live Codex thread and workspace.
 - Continuation turns use an internal continuation prompt instead of re-rendering the full workflow template.
 - The continuation prompt includes the issue identifier, refreshed tracker state, and the next turn count.
 - If the refreshed issue is still active and the current turn count has reached `agent.max_turns`, the run stops and the orchestrator transitions the issue to `In Review`.
-- If a run exits successfully without an explicit retry stop reason and the issue is still in an active state, the runtime transitions the issue to `Done`.
+- Before the runtime transitions an issue to `Done`, it pushes the current workspace `HEAD` to the issue branch and creates or reuses a GitHub pull request.
+- GitHub PR creation requires a clean git worktree other than `.harness/*` review artifacts.
+- If GitHub PR creation fails, the attempt follows the normal retry path and the issue does not move to `Done`.
 - If `.harness/review-notes.md` exists in a coding workspace, the runtime appends an internal prompt suffix telling the coding lane to read it first.
 - Review turns do not transition the issue to `In Progress`; they keep the issue in `In Review` until the verdict transitions it to `Done` or `Todo`.
+- When a review verdict returns `decision="done"`, the runtime creates or reuses the GitHub PR before the final `Done` transition.
 
 ## Reload Semantics
 

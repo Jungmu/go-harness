@@ -103,6 +103,14 @@ type RetryEntry struct {
 	LastError  string    `json:"last_error,omitempty"`
 }
 
+type PullRequest struct {
+	Number     int    `json:"number,omitempty"`
+	URL        string `json:"url,omitempty"`
+	HeadBranch string `json:"head_branch,omitempty"`
+	BaseBranch string `json:"base_branch,omitempty"`
+	Created    bool   `json:"created,omitempty"`
+}
+
 type RuntimeTotals struct {
 	InputTokens    int     `json:"input_tokens"`
 	OutputTokens   int     `json:"output_tokens"`
