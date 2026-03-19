@@ -143,7 +143,7 @@ func (c *Client) pushBranch(ctx context.Context, workspacePath, headBranch strin
 		authHeader := "AUTHORIZATION: basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+c.cfg.Token))
 		args = append(args, "-c", "http.extraheader="+authHeader)
 	}
-	args = append(args, "push", remoteURL, "HEAD:refs/heads/"+headBranch)
+	args = append(args, "push", "--force", remoteURL, "HEAD:refs/heads/"+headBranch)
 	if _, err := c.gitOutput(ctx, workspacePath, args...); err != nil {
 		return fmt.Errorf("push branch %q: %w", headBranch, err)
 	}

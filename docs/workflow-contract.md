@@ -147,6 +147,7 @@ Unknown variables and filters return `workflow_template_render_error`.
 - The continuation prompt includes the issue identifier, refreshed tracker state, and the next turn count.
 - If the refreshed issue is still active and the current turn count has reached `agent.max_turns`, the run stops and the orchestrator transitions the issue to `In Review`.
 - Before the runtime transitions an issue to `Done`, it pushes the current workspace `HEAD` to the issue branch and creates or reuses a GitHub pull request.
+- The GitHub handoff push treats the issue branch as harness-managed state and may replace older remote issue-branch history on retry.
 - GitHub PR creation requires a clean git worktree other than `.harness/*` runtime artifacts such as review files, tool caches, and scratch output.
 - If GitHub PR creation fails, the attempt follows the normal retry path and the issue does not move to `Done`.
 - If `.harness/review-notes.md` exists in a coding workspace, the runtime appends an internal prompt suffix telling the coding lane to read it first.
@@ -171,10 +172,11 @@ This is currently implemented as poll-time file change detection, not an `fsnoti
 
 - The runtime records issue-level timeline events for dispatch, workspace preparation, tracker state transitions, runner milestones, retries, and cleanup.
 - `GET /api/v1/state` exposes the most recent events as `recent_activity`.
-- `GET /api/v1/issues/{identifier}` returns the per-issue in-memory history buffer for the identifier when present.
+- `GET /api/v1/issues/{identifier}` returns the per-issue history buffer plus recent raw prompt transcript entries for the identifier when present.
+- `GET /issues/{identifier}` renders the same issue-level history plus a normalized HTML transcript view.
 - Running snapshots include `live_session.worker` so operators can distinguish `coding` from `review`.
 - The runtime also appends JSONL audit records under `workspace.root/.harness-history/`.
 - The persistent `## Harness Progress` Linear comment is tracker-only state; it is not projected into the HTTP status API.
 - If `logging.capture_prompts = true`, the Codex runner also appends per-issue JSONL prompt transcripts under `workspace.root/.harness-prompts/`.
 - Prompt transcripts record the plain rendered turn prompt plus raw stdin/stdout/stderr lines for that issue attempt.
-- Prompt transcripts are not included in `GET /api/v1/state` or `GET /api/v1/issues/{identifier}`.
+- Prompt transcripts are not included in `GET /api/v1/state`.

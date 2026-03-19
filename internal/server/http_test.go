@@ -52,6 +52,9 @@ func TestHandlerStateIssueAndRefreshEndpoints(t *testing.T) {
 				History: []domain.TimelineEvent{
 					{At: time.Date(2026, 3, 18, 8, 59, 0, 0, time.UTC), Identifier: identifier, Event: "issue_claimed"},
 				},
+				PromptTranscript: []domain.PromptTranscriptEntry{
+					{At: time.Date(2026, 3, 18, 8, 58, 0, 0, time.UTC), Attempt: 1, Channel: "prompt", Payload: "Handle ABC-1"},
+				},
 			}, true
 		},
 		func() { refreshCount++ },
@@ -99,6 +102,19 @@ func TestHandlerStateIssueAndRefreshEndpoints(t *testing.T) {
 	}
 	if len(issuePayload.History) != 1 || issuePayload.History[0].Event != "issue_claimed" {
 		t.Fatalf("issue history = %#v", issuePayload.History)
+	}
+	if len(issuePayload.PromptTranscript) != 1 || issuePayload.PromptTranscript[0].Channel != "prompt" {
+		t.Fatalf("issue prompt transcript = %#v", issuePayload.PromptTranscript)
+	}
+
+	issuePageReq := httptest.NewRequest(http.MethodGet, "/issues/ABC-1", nil)
+	issuePageRes := httptest.NewRecorder()
+	handler.ServeHTTP(issuePageRes, issuePageReq)
+	if issuePageRes.Code != http.StatusOK {
+		t.Fatalf("GET /issues/ABC-1 status = %d, want 200", issuePageRes.Code)
+	}
+	if !strings.Contains(issuePageRes.Body.String(), "Prompt Transcript") || !strings.Contains(issuePageRes.Body.String(), "Handle ABC-1") {
+		t.Fatalf("issue page body = %q, want prompt transcript", issuePageRes.Body.String())
 	}
 
 	refreshReq := httptest.NewRequest(http.MethodPost, "/api/v1/refresh", nil)
@@ -158,7 +174,28 @@ func TestHandlerDashboardRendersSnapshot(t *testing.T) {
 				Completed: []string{"ABC-3"},
 			}
 		},
-		func(string) (domain.IssueRuntimeSnapshot, bool) { return domain.IssueRuntimeSnapshot{}, false },
+		func(identifier string) (domain.IssueRuntimeSnapshot, bool) {
+			switch identifier {
+			case "ABC-1":
+				return domain.IssueRuntimeSnapshot{
+					Identifier: identifier,
+					Status:     "running",
+					PromptTranscript: []domain.PromptTranscriptEntry{
+						{At: time.Date(2026, 3, 18, 9, 0, 40, 0, time.UTC), Attempt: 2, Channel: "prompt", Payload: "Implement the fix for ABC-1"},
+					},
+				}, true
+			case "ABC-2":
+				return domain.IssueRuntimeSnapshot{
+					Identifier: identifier,
+					Status:     "retrying",
+					PromptTranscript: []domain.PromptTranscriptEntry{
+						{At: time.Date(2026, 3, 18, 9, 0, 55, 0, time.UTC), Attempt: 3, Channel: "stderr", Payload: "git fetch failed"},
+					},
+				}, true
+			default:
+				return domain.IssueRuntimeSnapshot{}, false
+			}
+		},
 		func() {},
 	)
 
@@ -172,7 +209,7 @@ func TestHandlerDashboardRendersSnapshot(t *testing.T) {
 		t.Fatalf("Content-Type = %q, want text/html", contentType)
 	}
 	body := res.Body.String()
-	for _, expected := range []string{"Go Harness Control Panel", "Dispatch blocked", "/repo/WORKFLOW.md", "/repo/REVIEW-WORKFLOW.md", "/repo/.env", "LINEAR_API_KEY", "&lt;redacted&gt;", "GO_HARNESS_LIVE_LINEAR_PROJECT_SLUG", "coding", "review", "ABC-1", "ABC-2", "ABC-3", "Action Needed", "Active Issues", "Retrying", "Timeline", "System Details", "issue claimed", "tracker state transition", "Todo -&gt; In Progress", "git fetch failed: not a git repository"} {
+	for _, expected := range []string{"Go Harness Control Panel", "Dispatch blocked", "/repo/WORKFLOW.md", "/repo/REVIEW-WORKFLOW.md", "/repo/.env", "LINEAR_API_KEY", "&lt;redacted&gt;", "GO_HARNESS_LIVE_LINEAR_PROJECT_SLUG", "coding", "review", "ABC-1", "ABC-2", "ABC-3", "Action Needed", "Active Issues", "Retrying", "Timeline", "System Details", "issue claimed", "tracker state transition", "Todo -&gt; In Progress", "git fetch failed: not a git repository", "Prompt Log", "Implement the fix for ABC-1", "Open Issue Detail"} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("dashboard body missing %q: %q", expected, body)
 		}

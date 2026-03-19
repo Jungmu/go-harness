@@ -143,6 +143,66 @@ func TestEnsurePullRequestReusesExistingOpenPullRequest(t *testing.T) {
 	}
 }
 
+func TestEnsurePullRequestForcePushesDivergedIssueBranch(t *testing.T) {
+	remotePath, workspacePath := setupGitWorkspace(t)
+	commitFile(t, workspacePath, "feature.txt", "hello\n", "feature commit")
+	runGit(t, workspacePath, "push", "origin", "HEAD:refs/heads/feature/ABC-1")
+
+	otherClone := filepath.Join(t.TempDir(), "other")
+	runGit(t, filepath.Dir(remotePath), "clone", remotePath, otherClone)
+	runGit(t, otherClone, "checkout", "-b", "feature/ABC-1", "origin/feature/ABC-1")
+	runGit(t, otherClone, "config", "user.name", "Harness Test")
+	runGit(t, otherClone, "config", "user.email", "harness@example.com")
+	commitFile(t, otherClone, "remote.txt", "remote\n", "remote update")
+	runGit(t, otherClone, "push", "origin", "HEAD:refs/heads/feature/ABC-1")
+
+	runGit(t, workspacePath, "reset", "--hard", "origin/main")
+	commitFile(t, workspacePath, "local.txt", "local\n", "local retry commit")
+
+	var postCalled atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/repos/acme/widgets/pulls":
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"number":   23,
+				"html_url": "https://github.example.com/acme/widgets/pull/23",
+			}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/repos/acme/widgets/pulls":
+			postCalled.Store(true)
+			t.Fatal("POST /pulls should not be called when an open PR already exists")
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.Client(), config.GitHubConfig{
+		Endpoint:   server.URL + "/api/v3",
+		Token:      "github-token",
+		Owner:      "acme",
+		Repo:       "widgets",
+		BaseBranch: "main",
+		RemoteURL:  remotePath,
+	})
+	pullRequest, err := client.EnsurePullRequest(context.Background(), domain.Issue{
+		Identifier: "ABC-1",
+		Title:      "Example issue",
+		BranchName: "feature/ABC-1",
+	}, domain.Workspace{Path: workspacePath})
+	if err != nil {
+		t.Fatalf("EnsurePullRequest() error = %v", err)
+	}
+
+	if pullRequest.Created {
+		t.Fatal("Created = true, want false when reusing an existing PR")
+	}
+	remoteHead := gitOutput(t, remotePath, "rev-parse", "refs/heads/feature/ABC-1")
+	workspaceHead := gitOutput(t, workspacePath, "rev-parse", "HEAD")
+	if remoteHead != workspaceHead {
+		t.Fatalf("remote head = %q, want %q after force push", remoteHead, workspaceHead)
+	}
+}
+
 func TestEnsurePullRequestIgnoresHarnessArtifactsButRejectsOtherDirtyFiles(t *testing.T) {
 	remotePath, workspacePath := setupGitWorkspace(t)
 	commitFile(t, workspacePath, "feature.txt", "hello\n", "feature commit")

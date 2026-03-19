@@ -1,7 +1,9 @@
 package codex
 
 import (
+	"bufio"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -129,4 +131,65 @@ func (r *transcriptRecorder) warn(msg string, attrs ...any) {
 		return
 	}
 	r.logger.Warn(msg, attrs...)
+}
+
+func TranscriptPath(workspaceRoot, identifier string) string {
+	workspaceKey := strings.TrimSpace(domain.SanitizeWorkspaceKey(identifier))
+	if strings.TrimSpace(workspaceRoot) == "" || workspaceKey == "" {
+		return ""
+	}
+	return filepath.Join(workspaceRoot, promptTranscriptDirname, workspaceKey+".jsonl")
+}
+
+func ReadTranscript(path string, limit int) ([]domain.PromptTranscriptEntry, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+
+	if limit <= 0 {
+		limit = 80
+	}
+	buffer := make([]domain.PromptTranscriptEntry, 0, limit)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var raw transcriptEntry
+		if err := json.Unmarshal([]byte(line), &raw); err != nil {
+			continue
+		}
+		entry := domain.PromptTranscriptEntry{
+			At:        raw.At,
+			Attempt:   raw.Attempt,
+			Direction: raw.Direction,
+			Channel:   raw.Channel,
+			SessionID: raw.SessionID,
+			ThreadID:  raw.ThreadID,
+			TurnID:    raw.TurnID,
+			TurnCount: raw.TurnCount,
+			Payload:   raw.Payload,
+		}
+		if len(buffer) == limit {
+			copy(buffer, buffer[1:])
+			buffer[len(buffer)-1] = entry
+			continue
+		}
+		buffer = append(buffer, entry)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return buffer, nil
 }

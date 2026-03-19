@@ -151,13 +151,26 @@ type StateSnapshot struct {
 }
 
 type IssueRuntimeSnapshot struct {
-	GeneratedAt time.Time        `json:"generated_at"`
-	Identifier  string           `json:"identifier"`
-	Status      string           `json:"status"`
-	Running     *RunningSnapshot `json:"running,omitempty"`
-	Retry       *RetryEntry      `json:"retry,omitempty"`
-	History     []TimelineEvent  `json:"history,omitempty"`
-	Completed   bool             `json:"completed,omitempty"`
+	GeneratedAt      time.Time                 `json:"generated_at"`
+	Identifier       string                    `json:"identifier"`
+	Status           string                    `json:"status"`
+	Running          *RunningSnapshot          `json:"running,omitempty"`
+	Retry            *RetryEntry               `json:"retry,omitempty"`
+	History          []TimelineEvent           `json:"history,omitempty"`
+	PromptTranscript []PromptTranscriptEntry   `json:"prompt_transcript,omitempty"`
+	Completed        bool                      `json:"completed,omitempty"`
+}
+
+type PromptTranscriptEntry struct {
+	At        time.Time `json:"at"`
+	Attempt   int       `json:"attempt,omitempty"`
+	Direction string    `json:"direction"`
+	Channel   string    `json:"channel"`
+	SessionID string    `json:"session_id,omitempty"`
+	ThreadID  string    `json:"thread_id,omitempty"`
+	TurnID    string    `json:"turn_id,omitempty"`
+	TurnCount int       `json:"turn_count,omitempty"`
+	Payload   string    `json:"payload"`
 }
 
 type SnapshotCounts struct {

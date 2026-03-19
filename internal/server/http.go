@@ -71,7 +71,16 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 		}
 		return strings.ReplaceAll(strings.TrimSpace(event.Event), "_", " ")
 	},
-	"runningSummary": func(snapshot domain.RunningSnapshot) string {
+	"runningSummary": func(value any) string {
+		var snapshot domain.RunningSnapshot
+		switch typed := value.(type) {
+		case domain.RunningSnapshot:
+			snapshot = typed
+		case issuePanel:
+			snapshot = typed.RunningSnapshot
+		default:
+			return "-"
+		}
 		if n := len(snapshot.RecentEvents); n > 0 {
 			last := snapshot.RecentEvents[n-1]
 			if strings.TrimSpace(last.Message) != "" {
@@ -90,7 +99,16 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 		}
 		return "-"
 	},
-	"runningLastAt": func(snapshot domain.RunningSnapshot) time.Time {
+	"runningLastAt": func(value any) time.Time {
+		var snapshot domain.RunningSnapshot
+		switch typed := value.(type) {
+		case domain.RunningSnapshot:
+			snapshot = typed
+		case issuePanel:
+			snapshot = typed.RunningSnapshot
+		default:
+			return time.Time{}
+		}
 		if n := len(snapshot.RecentEvents); n > 0 {
 			return snapshot.RecentEvents[n-1].At
 		}
@@ -102,12 +120,47 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 		}
 		return snapshot.StartedAt
 	},
-	"attentionCount": func(snapshot domain.StateSnapshot) int {
-		count := len(snapshot.Retrying)
-		if snapshot.Dispatch.Blocked {
-			count++
+	"attentionCount": func(value any) int {
+		switch snapshot := value.(type) {
+		case domain.StateSnapshot:
+			count := len(snapshot.Retrying)
+			if snapshot.Dispatch.Blocked {
+				count++
+			}
+			return count
+		case dashboardView:
+			count := len(snapshot.Retrying)
+			if snapshot.Dispatch.Blocked {
+				count++
+			}
+			return count
+		default:
+			return 0
 		}
-		return count
+	},
+	"transcriptLabel": func(entry domain.PromptTranscriptEntry) string {
+		switch strings.TrimSpace(entry.Channel) {
+		case "prompt":
+			return "rendered prompt"
+		case "stderr":
+			return "stderr"
+		case "stdin":
+			return "stdin"
+		case "stdout":
+			return "stdout"
+		default:
+			if strings.TrimSpace(entry.Channel) == "" {
+				return "transcript"
+			}
+			return entry.Channel
+		}
+	},
+	"transcriptBody": func(entry domain.PromptTranscriptEntry) string {
+		payload := strings.TrimSpace(entry.Payload)
+		if payload == "" {
+			return "-"
+		}
+		return payload
 	},
 }).Parse(`<!doctype html>
 <html lang="en">
@@ -333,9 +386,32 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       font-size: 18px;
       line-height: 1.2;
     }
+    .issue-links {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
     .mono {
       font-family: "Iosevka", "SFMono-Regular", monospace;
       font-size: 13px;
+    }
+    .prompt-preview {
+      display: grid;
+      gap: 10px;
+      border-top: 1px solid var(--border);
+      padding-top: 12px;
+    }
+    .prompt-line {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+      background: #fffdf8;
+    }
+    .prompt-line pre {
+      margin: 8px 0 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font: inherit;
     }
     .kvs {
       display: grid;
@@ -549,9 +625,9 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <h2>Active Issues</h2>
               <span class="muted">{{ .Counts.Running }} running</span>
             </div>
-            {{ if .Running }}
+            {{ if .RunningCards }}
             <div class="card-list">
-              {{ range .Running }}
+              {{ range .RunningCards }}
               <article class="issue-card">
                 <div class="issue-top">
                   <div class="issue-title">
@@ -595,6 +671,24 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
                 {{ if .LastError }}
                 <div class="mono">{{ clip .LastError 180 }}</div>
                 {{ end }}
+                {{ if .PromptTranscript }}
+                <div class="prompt-preview">
+                  <div class="section-head">
+                    <h3>Prompt Log</h3>
+                    <span class="muted">recent transcript preview</span>
+                  </div>
+                  {{ range .PromptTranscript }}
+                  <div class="prompt-line">
+                    <div class="timeline-meta mono">{{ relativeTime .At }} · {{ .Kind }}{{ if .Attempt }} · attempt {{ .Attempt }}{{ end }}</div>
+                    <pre>{{ clip .Body 320 }}</pre>
+                  </div>
+                  {{ end }}
+                </div>
+                {{ end }}
+                <div class="issue-links">
+                  <a class="button secondary" href="/issues/{{ .Issue.Identifier }}">Open Issue Detail</a>
+                  <a class="button secondary" href="/api/v1/issues/{{ .Issue.Identifier }}">Open Issue JSON</a>
+                </div>
               </article>
               {{ end }}
             </div>
@@ -608,9 +702,9 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
               <h2>Retrying</h2>
               <span class="muted">{{ .Counts.Retrying }} queued</span>
             </div>
-            {{ if .Retrying }}
+            {{ if .RetryCards }}
             <div class="card-list">
-              {{ range .Retrying }}
+              {{ range .RetryCards }}
               <article class="issue-card warn">
                 <div class="issue-top">
                   <div class="issue-title">
@@ -633,6 +727,24 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
                 {{ if .LastError }}
                 <div class="mono">{{ clip .LastError 220 }}</div>
                 {{ end }}
+                {{ if .PromptTranscript }}
+                <div class="prompt-preview">
+                  <div class="section-head">
+                    <h3>Prompt Log</h3>
+                    <span class="muted">recent transcript preview</span>
+                  </div>
+                  {{ range .PromptTranscript }}
+                  <div class="prompt-line">
+                    <div class="timeline-meta mono">{{ relativeTime .At }} · {{ .Kind }}{{ if .Attempt }} · attempt {{ .Attempt }}{{ end }}</div>
+                    <pre>{{ clip .Body 320 }}</pre>
+                  </div>
+                  {{ end }}
+                </div>
+                {{ end }}
+                <div class="issue-links">
+                  <a class="button secondary" href="/issues/{{ .Identifier }}">Open Issue Detail</a>
+                  <a class="button secondary" href="/api/v1/issues/{{ .Identifier }}">Open Issue JSON</a>
+                </div>
               </article>
               {{ end }}
             </div>
@@ -730,6 +842,174 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 </body>
 </html>`))
 
+var issueTemplate = template.Must(template.New("issue").Funcs(template.FuncMap{
+	"formatTime": func(value time.Time) string {
+		if value.IsZero() {
+			return "-"
+		}
+		return value.Format(time.RFC3339)
+	},
+	"relativeTime": func(value time.Time) string {
+		if value.IsZero() {
+			return "-"
+		}
+		now := time.Now().UTC()
+		delta := value.Sub(now)
+		if delta < 0 {
+			return fmt.Sprintf("%s ago", humanDuration(-delta))
+		}
+		return fmt.Sprintf("in %s", humanDuration(delta))
+	},
+	"clip": func(value string, limit int) string {
+		value = strings.TrimSpace(value)
+		if len(value) <= limit {
+			return value
+		}
+		if limit <= 1 {
+			return value[:limit]
+		}
+		return value[:limit-1] + "…"
+	},
+	"eventLabel": func(value string) string {
+		if strings.TrimSpace(value) == "" {
+			return "-"
+		}
+		return strings.ReplaceAll(strings.TrimSpace(value), "_", " ")
+	},
+	"timelineSummary": func(event domain.TimelineEvent) string {
+		if event.StateBefore != "" || event.StateAfter != "" {
+			return strings.TrimSpace(event.StateBefore + " -> " + event.StateAfter)
+		}
+		if event.Message != "" {
+			return event.Message
+		}
+		if event.LastError != "" {
+			return event.LastError
+		}
+		return strings.ReplaceAll(strings.TrimSpace(event.Event), "_", " ")
+	},
+	"transcriptLabel": func(entry domain.PromptTranscriptEntry) string {
+		switch strings.TrimSpace(entry.Channel) {
+		case "prompt":
+			return "rendered prompt"
+		case "stderr":
+			return "stderr"
+		case "stdin":
+			return "stdin"
+		case "stdout":
+			return "stdout"
+		default:
+			if strings.TrimSpace(entry.Channel) == "" {
+				return "transcript"
+			}
+			return entry.Channel
+		}
+	},
+}).Parse(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Issue Detail</title>
+  <style>
+    body { margin: 0; font-family: "Iosevka Etoile", "IBM Plex Sans", sans-serif; background: #f3efe7; color: #1f1f1f; }
+    main { max-width: 1100px; margin: 0 auto; padding: 28px 20px 56px; display: grid; gap: 16px; }
+    .panel { background: #fffdf8; border: 1px solid #d9d1c3; border-radius: 16px; padding: 18px 20px; }
+    .top { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
+    .muted { color: #635c52; }
+    .mono { font-family: "Iosevka", "SFMono-Regular", monospace; font-size: 13px; word-break: break-word; }
+    .button { display: inline-flex; text-decoration: none; border-radius: 999px; padding: 10px 16px; background: #174c62; color: white; }
+    .stack { display: grid; gap: 10px; }
+    .item { border: 1px solid #d9d1c3; border-radius: 12px; padding: 12px 14px; background: #fffaf2; }
+    .item pre { margin: 8px 0 0; white-space: pre-wrap; word-break: break-word; font: inherit; }
+    h1,h2,h3,p { margin: 0; }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="panel">
+      <div class="top">
+        <div>
+          <h1>{{ .Identifier }}</h1>
+          <p class="muted">status={{ .Status }} · snapshot {{ formatTime .GeneratedAt }}</p>
+        </div>
+        <a class="button" href="/">Back To Dashboard</a>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="top">
+        <div>
+          <h2>Prompt Transcript</h2>
+          <p class="muted">latest entries first, human-readable preview</p>
+        </div>
+        <a class="button" href="/api/v1/issues/{{ .Identifier }}">Open JSON</a>
+      </div>
+      {{ if .Transcript }}
+      <div class="stack" style="margin-top:14px">
+        {{ range .Transcript }}
+        <div class="item">
+          <div class="mono muted">{{ relativeTime .At }} · {{ .Kind }}{{ if .Attempt }} · attempt {{ .Attempt }}{{ end }}</div>
+          <pre>{{ clip .Body 4000 }}</pre>
+        </div>
+        {{ end }}
+      </div>
+      {{ else }}
+      <p class="muted" style="margin-top:14px">No prompt transcript entries recorded for this issue.</p>
+      {{ end }}
+    </section>
+
+    <section class="panel">
+      <h2>Issue Timeline</h2>
+      {{ if .History }}
+      <div class="stack" style="margin-top:14px">
+        {{ range .History }}
+        <div class="item">
+          <div><strong>{{ eventLabel .Event }}</strong></div>
+          <div>{{ clip (timelineSummary .) 320 }}</div>
+          <div class="mono muted">{{ formatTime .At }}{{ if .Attempt }} · attempt {{ .Attempt }}{{ end }}</div>
+        </div>
+        {{ end }}
+      </div>
+      {{ else }}
+      <p class="muted" style="margin-top:14px">No timeline entries recorded for this issue.</p>
+      {{ end }}
+    </section>
+  </main>
+</body>
+</html>`))
+
+type dashboardView struct {
+	domain.StateSnapshot
+	RunningCards []issuePanel
+	RetryCards   []retryPanel
+}
+
+type issuePanel struct {
+	domain.RunningSnapshot
+	PromptTranscript []transcriptViewEntry
+}
+
+type retryPanel struct {
+	domain.RetryEntry
+	PromptTranscript []transcriptViewEntry
+}
+
+type issueDetailView struct {
+	GeneratedAt time.Time
+	Identifier  string
+	Status      string
+	Transcript  []transcriptViewEntry
+	History     []domain.TimelineEvent
+}
+
+type transcriptViewEntry struct {
+	At      time.Time
+	Attempt int
+	Kind    string
+	Body    string
+}
+
 func NewHandler(snapshot func() domain.StateSnapshot, issueSnapshot func(string) (domain.IssueRuntimeSnapshot, bool), triggerRefresh func()) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -771,6 +1051,37 @@ func NewHandler(snapshot func() domain.StateSnapshot, issueSnapshot func(string)
 		}
 		writeJSON(w, http.StatusOK, payload)
 	})
+	mux.HandleFunc("/issues/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+			return
+		}
+		identifier := strings.TrimPrefix(r.URL.Path, "/issues/")
+		if identifier == "" {
+			writeError(w, http.StatusNotFound, "not_found", "issue identifier is required")
+			return
+		}
+		payload, ok := issueSnapshot(identifier)
+		if !ok {
+			writeError(w, http.StatusNotFound, "not_found", "issue is not present in the current runtime state")
+			return
+		}
+		view := issueDetailView{
+			GeneratedAt: payload.GeneratedAt,
+			Identifier:  payload.Identifier,
+			Status:      payload.Status,
+			Transcript:  reverseTranscriptView(normalizeTranscript(payload.PromptTranscript)),
+			History:     payload.History,
+		}
+		var rendered bytes.Buffer
+		if err := issueTemplate.Execute(&rendered, view); err != nil {
+			writeError(w, http.StatusInternalServerError, "issue_render_failed", err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(rendered.Bytes())
+	})
 	mux.HandleFunc("/api/v1/refresh", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
@@ -790,7 +1101,7 @@ func NewHandler(snapshot func() domain.StateSnapshot, issueSnapshot func(string)
 		}
 
 		var rendered bytes.Buffer
-		if err := dashboardTemplate.Execute(&rendered, snapshot()); err != nil {
+		if err := dashboardTemplate.Execute(&rendered, buildDashboardView(snapshot(), issueSnapshot)); err != nil {
 			writeError(w, http.StatusInternalServerError, "dashboard_render_failed", err.Error())
 			return
 		}
@@ -800,6 +1111,175 @@ func NewHandler(snapshot func() domain.StateSnapshot, issueSnapshot func(string)
 		_, _ = w.Write(rendered.Bytes())
 	})
 	return mux
+}
+
+func buildDashboardView(snapshot domain.StateSnapshot, issueSnapshot func(string) (domain.IssueRuntimeSnapshot, bool)) dashboardView {
+	view := dashboardView{
+		StateSnapshot: snapshot,
+		RunningCards:  make([]issuePanel, 0, len(snapshot.Running)),
+		RetryCards:    make([]retryPanel, 0, len(snapshot.Retrying)),
+	}
+	for _, running := range snapshot.Running {
+		panel := issuePanel{RunningSnapshot: running}
+		if payload, ok := issueSnapshot(running.Issue.Identifier); ok {
+			panel.PromptTranscript = promptPreview(payload.PromptTranscript, 3)
+		}
+		view.RunningCards = append(view.RunningCards, panel)
+	}
+	for _, retry := range snapshot.Retrying {
+		panel := retryPanel{RetryEntry: retry}
+		if payload, ok := issueSnapshot(retry.Identifier); ok {
+			panel.PromptTranscript = promptPreview(payload.PromptTranscript, 3)
+		}
+		view.RetryCards = append(view.RetryCards, panel)
+	}
+	return view
+}
+
+func promptPreview(entries []domain.PromptTranscriptEntry, limit int) []transcriptViewEntry {
+	items := normalizeTranscript(entries)
+	if len(items) == 0 || limit <= 0 {
+		return nil
+	}
+	if len(items) > limit {
+		items = items[len(items)-limit:]
+	}
+	return reverseTranscriptView(items)
+}
+
+func reverseTranscriptView(entries []transcriptViewEntry) []transcriptViewEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]transcriptViewEntry, len(entries))
+	for i := range entries {
+		out[len(entries)-1-i] = entries[i]
+	}
+	return out
+}
+
+func normalizeTranscript(entries []domain.PromptTranscriptEntry) []transcriptViewEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	items := make([]transcriptViewEntry, 0, len(entries))
+	for _, entry := range entries {
+		if item, ok := normalizeTranscriptEntry(entry); ok {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+func normalizeTranscriptEntry(entry domain.PromptTranscriptEntry) (transcriptViewEntry, bool) {
+	switch strings.TrimSpace(entry.Channel) {
+	case "prompt":
+		return transcriptViewEntry{At: entry.At, Attempt: entry.Attempt, Kind: "Prompt", Body: strings.TrimSpace(entry.Payload)}, true
+	case "stderr":
+		return transcriptViewEntry{At: entry.At, Attempt: entry.Attempt, Kind: "stderr", Body: strings.TrimSpace(entry.Payload)}, true
+	case "stdout":
+		return normalizeProtocolPayload(entry)
+	default:
+		return transcriptViewEntry{}, false
+	}
+}
+
+func normalizeProtocolPayload(entry domain.PromptTranscriptEntry) (transcriptViewEntry, bool) {
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(entry.Payload), &payload); err != nil {
+		return transcriptViewEntry{}, false
+	}
+	method, _ := payload["method"].(string)
+	switch method {
+	case "item/completed":
+		item := nestedMap(payload, "params", "item")
+		switch strings.ToLower(stringValue(item, "type")) {
+		case "agentmessage":
+			if text := strings.TrimSpace(stringValue(item, "text")); text != "" {
+				return transcriptViewEntry{At: entry.At, Attempt: entry.Attempt, Kind: "Agent", Body: text}, true
+			}
+		case "commandexecution":
+			body := strings.TrimSpace(stringValue(item, "aggregatedOutput"))
+			if body == "" {
+				body = strings.TrimSpace(stringValue(item, "command"))
+			}
+			if body != "" {
+				return transcriptViewEntry{At: entry.At, Attempt: entry.Attempt, Kind: "Command", Body: body}, true
+			}
+		}
+	case "item/started":
+		item := nestedMap(payload, "params", "item")
+		if strings.ToLower(stringValue(item, "type")) == "commandexecution" {
+			if command := strings.TrimSpace(stringValue(item, "command")); command != "" {
+				return transcriptViewEntry{At: entry.At, Attempt: entry.Attempt, Kind: "Command", Body: command}, true
+			}
+		}
+	case "codex/event/plan_update":
+		plan := nestedSlice(payload, "params", "msg", "plan")
+		lines := make([]string, 0, len(plan))
+		for _, raw := range plan {
+			stepMap, _ := raw.(map[string]any)
+			step := strings.TrimSpace(stringValue(stepMap, "step"))
+			status := strings.TrimSpace(stringValue(stepMap, "status"))
+			if step == "" {
+				continue
+			}
+			if status != "" {
+				lines = append(lines, "["+status+"] "+step)
+			} else {
+				lines = append(lines, step)
+			}
+		}
+		if len(lines) > 0 {
+			return transcriptViewEntry{At: entry.At, Attempt: entry.Attempt, Kind: "Plan", Body: strings.Join(lines, "\n")}, true
+		}
+	case "turn/started":
+		return transcriptViewEntry{At: entry.At, Attempt: entry.Attempt, Kind: "Turn", Body: "turn started"}, true
+	case "turn/completed":
+		return transcriptViewEntry{At: entry.At, Attempt: entry.Attempt, Kind: "Turn", Body: "turn completed"}, true
+	}
+	return transcriptViewEntry{}, false
+}
+
+func nestedMap(root map[string]any, keys ...string) map[string]any {
+	current := root
+	for i, key := range keys {
+		value, ok := current[key]
+		if !ok {
+			return nil
+		}
+		if i == len(keys)-1 {
+			result, _ := value.(map[string]any)
+			return result
+		}
+		next, _ := value.(map[string]any)
+		if next == nil {
+			return nil
+		}
+		current = next
+	}
+	return nil
+}
+
+func nestedSlice(root map[string]any, keys ...string) []any {
+	if len(keys) == 0 {
+		return nil
+	}
+	parent := nestedMap(root, keys[:len(keys)-1]...)
+	if parent == nil {
+		return nil
+	}
+	values, _ := parent[keys[len(keys)-1]].([]any)
+	return values
+}
+
+func stringValue(root map[string]any, key string) string {
+	if root == nil {
+		return ""
+	}
+	value, _ := root[key]
+	text, _ := value.(string)
+	return text
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

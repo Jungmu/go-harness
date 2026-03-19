@@ -256,46 +256,68 @@ func (o *Orchestrator) Snapshot() domain.StateSnapshot {
 func (o *Orchestrator) IssueSnapshot(identifier string) (domain.IssueRuntimeSnapshot, bool) {
 	snapshot := o.Snapshot()
 	history := o.issueHistory(identifier)
+	transcript := o.issueTranscript(identifier)
 	for _, running := range snapshot.Running {
 		if running.Issue.Identifier == identifier {
 			return domain.IssueRuntimeSnapshot{
-				GeneratedAt: snapshot.GeneratedAt,
-				Identifier:  identifier,
-				Status:      "running",
-				Running:     &running,
-				History:     history,
+				GeneratedAt:      snapshot.GeneratedAt,
+				Identifier:       identifier,
+				Status:           "running",
+				Running:          &running,
+				History:          history,
+				PromptTranscript: transcript,
 			}, true
 		}
 	}
 	for _, retry := range snapshot.Retrying {
 		if retry.Identifier == identifier {
 			return domain.IssueRuntimeSnapshot{
-				GeneratedAt: snapshot.GeneratedAt,
-				Identifier:  identifier,
-				Status:      "retrying",
-				Retry:       &retry,
-				History:     history,
+				GeneratedAt:      snapshot.GeneratedAt,
+				Identifier:       identifier,
+				Status:           "retrying",
+				Retry:            &retry,
+				History:          history,
+				PromptTranscript: transcript,
 			}, true
 		}
 	}
 	if slices.Contains(snapshot.Completed, identifier) {
 		return domain.IssueRuntimeSnapshot{
-			GeneratedAt: snapshot.GeneratedAt,
-			Identifier:  identifier,
-			Status:      "completed",
-			History:     history,
-			Completed:   true,
+			GeneratedAt:      snapshot.GeneratedAt,
+			Identifier:       identifier,
+			Status:           "completed",
+			History:          history,
+			PromptTranscript: transcript,
+			Completed:        true,
 		}, true
 	}
-	if len(history) > 0 {
+	if len(history) > 0 || len(transcript) > 0 {
 		return domain.IssueRuntimeSnapshot{
-			GeneratedAt: snapshot.GeneratedAt,
-			Identifier:  identifier,
-			Status:      "observed",
-			History:     history,
+			GeneratedAt:      snapshot.GeneratedAt,
+			Identifier:       identifier,
+			Status:           "observed",
+			History:          history,
+			PromptTranscript: transcript,
 		}, true
 	}
 	return domain.IssueRuntimeSnapshot{}, false
+}
+
+func (o *Orchestrator) issueTranscript(identifier string) []domain.PromptTranscriptEntry {
+	path := codex.TranscriptPath(o.cfg.Workspace.Root, identifier)
+	if path == "" {
+		return nil
+	}
+	entries, err := codex.ReadTranscript(path, 80)
+	if err != nil {
+		o.logger.Warn("prompt transcript read failed",
+			slog.String("issue", identifier),
+			slog.String("path", path),
+			slog.Any("error", err),
+		)
+		return nil
+	}
+	return entries
 }
 
 func (o *Orchestrator) loop(ctx context.Context) {

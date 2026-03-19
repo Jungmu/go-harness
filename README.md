@@ -186,6 +186,7 @@ HTTP endpoints:
 - `GET /healthz`
 - `GET /api/v1/state`
 - `GET /api/v1/issues/{identifier}`
+- `GET /issues/{identifier}`
 - `POST /api/v1/refresh`
 
 The root dashboard auto-refreshes and shows the active workflow file paths, `.env` path and tracked env entries, running issues, retry queue, completed identifiers, worker labels, token totals, and whether dispatch is currently blocked by an invalid workflow reload. Sensitive env values such as API keys are redacted in the dashboard and JSON state.
@@ -193,11 +194,12 @@ The root dashboard auto-refreshes and shows the active workflow file paths, `.en
 Execution history:
 
 - the harness records issue-level timeline events in memory and exposes them as `recent_activity` in `GET /api/v1/state`
-- the dashboard renders a human-readable operations view with attention items, retry errors, live session summaries, and the same recent timeline
-- `GET /api/v1/issues/{identifier}` returns the per-issue in-memory history buffer, not just the global recent-activity window
+- the dashboard renders a human-readable operations view with attention items, retry errors, live session summaries, normalized prompt previews, and the same recent timeline
+- `GET /api/v1/issues/{identifier}` returns the per-issue history buffer plus recent raw prompt transcript entries when present
+- `GET /issues/{identifier}` renders the same issue history plus a normalized human-readable transcript view
 - the harness also appends per-issue JSONL history files under `workspace.root/.harness-history/`
 - if `logging.capture_prompts` is enabled, the runner also appends raw prompt/stdin/stdout/stderr transcript files under `workspace.root/.harness-prompts/`
-- raw prompt transcripts are file-only; they are not exposed through the HTTP status API or dashboard
+- `GET /api/v1/state` still does not embed raw prompt transcripts; the dashboard and issue detail page render normalized per-issue previews from transcript files
 - cleanup removes the workspace directory, but not the `.harness-history` or `.harness-prompts` audit trail
 
 Review lane:
