@@ -3,8 +3,10 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,6 +20,95 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
 		}
 		return value.Format(time.RFC3339)
 	},
+	"relativeTime": func(value time.Time) string {
+		if value.IsZero() {
+			return "-"
+		}
+		now := time.Now().UTC()
+		delta := value.Sub(now)
+		if delta < 0 {
+			delta = -delta
+			return fmt.Sprintf("%s ago", humanDuration(delta))
+		}
+		return fmt.Sprintf("in %s", humanDuration(delta))
+	},
+	"clip": func(value string, limit int) string {
+		value = strings.TrimSpace(value)
+		if len(value) <= limit {
+			return value
+		}
+		if limit <= 1 {
+			return value[:limit]
+		}
+		return value[:limit-1] + "…"
+	},
+	"basePath": func(value string) string {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return "-"
+		}
+		return filepath.Base(value)
+	},
+	"eventLabel": func(value string) string {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return "-"
+		}
+		return strings.ReplaceAll(value, "_", " ")
+	},
+	"timelineSummary": func(event domain.TimelineEvent) string {
+		if event.StateBefore != "" || event.StateAfter != "" {
+			return strings.TrimSpace(event.StateBefore + " -> " + event.StateAfter)
+		}
+		if event.Message != "" {
+			return event.Message
+		}
+		if event.LastError != "" {
+			return event.LastError
+		}
+		if event.Reason != "" {
+			return "reason=" + event.Reason
+		}
+		return strings.ReplaceAll(strings.TrimSpace(event.Event), "_", " ")
+	},
+	"runningSummary": func(snapshot domain.RunningSnapshot) string {
+		if n := len(snapshot.RecentEvents); n > 0 {
+			last := snapshot.RecentEvents[n-1]
+			if strings.TrimSpace(last.Message) != "" {
+				return last.Message
+			}
+			if strings.TrimSpace(last.PayloadSummary) != "" {
+				return last.PayloadSummary
+			}
+			return strings.ReplaceAll(strings.TrimSpace(last.Event), "_", " ")
+		}
+		if snapshot.LiveSession != nil && strings.TrimSpace(snapshot.LiveSession.LastMessage) != "" {
+			return snapshot.LiveSession.LastMessage
+		}
+		if snapshot.LiveSession != nil && strings.TrimSpace(snapshot.LiveSession.LastEvent) != "" {
+			return strings.ReplaceAll(strings.TrimSpace(snapshot.LiveSession.LastEvent), "_", " ")
+		}
+		return "-"
+	},
+	"runningLastAt": func(snapshot domain.RunningSnapshot) time.Time {
+		if n := len(snapshot.RecentEvents); n > 0 {
+			return snapshot.RecentEvents[n-1].At
+		}
+		if snapshot.LiveSession != nil {
+			if !snapshot.LiveSession.LastEventAt.IsZero() {
+				return snapshot.LiveSession.LastEventAt
+			}
+			return snapshot.LiveSession.StartedAt
+		}
+		return snapshot.StartedAt
+	},
+	"attentionCount": func(snapshot domain.StateSnapshot) int {
+		count := len(snapshot.Retrying)
+		if snapshot.Dispatch.Blocked {
+			count++
+		}
+		return count
+	},
 }).Parse(`<!doctype html>
 <html lang="en">
 <head>
@@ -28,14 +119,18 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
   <style>
     :root {
       color-scheme: light;
-      --bg: #f4f1ea;
+      --bg: #f3efe7;
       --panel: #fffdf8;
+      --panel-strong: #fff8ee;
       --ink: #1f1f1f;
-      --muted: #5f5a52;
+      --muted: #635c52;
       --border: #d9d1c3;
       --accent: #174c62;
+      --accent-soft: #d9e7ed;
       --warn: #9a3412;
+      --warn-soft: #fff0e8;
       --ok: #166534;
+      --ok-soft: #e8f5ec;
     }
     * { box-sizing: border-box; }
     body {
@@ -45,28 +140,84 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       color: var(--ink);
     }
     main {
-      max-width: 1200px;
+      max-width: 1280px;
       margin: 0 auto;
-      padding: 32px 20px 48px;
+      padding: 28px 20px 56px;
     }
-    h1, h2 { margin: 0 0 12px; }
-    .hero {
+    h1, h2, h3, p { margin: 0; }
+    .shell {
       display: grid;
-      gap: 16px;
-      margin-bottom: 24px;
+      gap: 18px;
     }
-    .hero-card, .panel {
+    .panel {
       background: var(--panel);
       border: 1px solid var(--border);
       border-radius: 16px;
       padding: 18px 20px;
       box-shadow: 0 10px 30px rgba(31, 31, 31, 0.04);
     }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.7fr) minmax(280px, 1fr);
+      gap: 16px;
+    }
+    .hero-main {
+      background: linear-gradient(135deg, #fffaf1, #fffdf8);
+    }
+    .hero-kicker {
+      color: var(--muted);
+      font-size: 13px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+    .hero-title {
+      display: flex;
+      justify-content: space-between;
+      align-items: start;
+      gap: 16px;
+      margin-bottom: 12px;
+    }
+    .hero-title h1 {
+      font-size: 34px;
+      line-height: 1.05;
+    }
+    .hero-summary {
+      display: grid;
+      gap: 8px;
+      color: var(--muted);
+      margin-bottom: 18px;
+    }
+    .hero-meta {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+    .meta-block {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px 14px;
+      background: rgba(255,255,255,0.7);
+    }
+    .meta-label {
+      display: block;
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
     .stats {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: 12px;
-      margin-bottom: 24px;
+    }
+    .stat {
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px 16px;
+      background: var(--panel-strong);
     }
     .stat-label {
       display: block;
@@ -79,6 +230,11 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     .stat-value {
       font-size: 28px;
       font-weight: 700;
+    }
+    .stat-note {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 6px;
     }
     .dispatch-ok { color: var(--ok); }
     .dispatch-blocked { color: var(--warn); }
@@ -103,37 +259,99 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       background: #d6e2e8;
       color: #153441;
     }
-    .grid {
+    .section-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 14px;
+    }
+    .stack {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 6px;
+    }
+    .muted {
+      color: var(--muted);
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 4px 10px;
+      background: #e8f0f3;
+      color: #153441;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .pill.warn {
+      background: #fff1ea;
+      color: var(--warn);
+    }
+    .pill.ok {
+      background: var(--ok-soft);
+      color: var(--ok);
+    }
+    .pill.neutral {
+      background: var(--accent-soft);
+      color: #153441;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(340px, 0.9fr);
       gap: 16px;
     }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 14px;
+    .column {
+      display: grid;
+      gap: 16px;
     }
-    th, td {
-      padding: 10px 0;
-      border-bottom: 1px solid var(--border);
-      vertical-align: top;
-      text-align: left;
+    .card-list {
+      display: grid;
+      gap: 12px;
     }
-    th {
-      font-size: 12px;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--muted);
+    .issue-card {
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 16px;
+      background: #fffaf2;
+      display: grid;
+      gap: 14px;
+    }
+    .issue-card.warn {
+      background: var(--warn-soft);
+    }
+    .issue-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+    }
+    .issue-title {
+      display: grid;
+      gap: 6px;
+    }
+    .issue-title h3 {
+      font-size: 18px;
+      line-height: 1.2;
     }
     .mono {
       font-family: "Iosevka", "SFMono-Regular", monospace;
       font-size: 13px;
     }
-    ul {
-      margin: 8px 0 0;
-      padding-left: 18px;
+    .kvs {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px 14px;
     }
-    li + li { margin-top: 6px; }
+    .kv {
+      display: grid;
+      gap: 4px;
+    }
+    .kv-label {
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
     .empty {
       color: var(--muted);
       margin: 0;
@@ -141,7 +359,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
     .timeline {
       display: grid;
       gap: 10px;
-      max-height: 420px;
+      max-height: 820px;
       overflow: auto;
     }
     .timeline-item {
@@ -161,182 +379,353 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
       color: var(--muted);
       font-size: 13px;
     }
+    .attention-list {
+      display: grid;
+      gap: 10px;
+    }
+    .attention-item {
+      border-left: 4px solid var(--warn);
+      padding-left: 12px;
+    }
+    details.panel {
+      padding: 0;
+      overflow: hidden;
+    }
+    details > summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 18px 20px;
+      font-weight: 700;
+    }
+    details > summary::-webkit-details-marker {
+      display: none;
+    }
+    .details-body {
+      border-top: 1px solid var(--border);
+      padding: 18px 20px 20px;
+    }
+    .system-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 16px;
+    }
+    .system-block {
+      display: grid;
+      gap: 10px;
+    }
+    .system-list {
+      display: grid;
+      gap: 8px;
+    }
+    .system-row {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+      background: #fffaf2;
+    }
+    @media (max-width: 960px) {
+      .hero,
+      .layout {
+        grid-template-columns: 1fr;
+      }
+      .timeline {
+        max-height: none;
+      }
+    }
   </style>
 </head>
 <body>
   <main>
-    <section class="hero">
-      <div class="hero-card">
-        <h1>Go Harness</h1>
-        <p>Last snapshot: <span class="mono">{{ formatTime .GeneratedAt }}</span></p>
-        <p>Workflow: <span class="mono">{{ if .Workflow.Path }}{{ .Workflow.Path }}{{ else }}-{{ end }}</span></p>
-        <p>Review workflow: <span class="mono">{{ if .Workflow.ReviewPath }}{{ .Workflow.ReviewPath }}{{ else }}-{{ end }}</span></p>
-        <p>Env file: <span class="mono">{{ if .Environment.DotEnvPath }}{{ .Environment.DotEnvPath }}{{ else }}-{{ end }}</span> {{ if .Environment.DotEnvPresent }}(present){{ else }}(missing){{ end }}</p>
-        {{ if .Dispatch.Blocked }}
-        <p class="dispatch-blocked"><strong>Dispatch blocked</strong>: {{ .Dispatch.Error }}</p>
-        {{ else }}
-        <p class="dispatch-ok"><strong>Dispatch healthy</strong></p>
-        {{ end }}
-        {{ if .Dispatch.Workers }}
-        <ul>
-          {{ range .Dispatch.Workers }}
-          <li><span class="mono">{{ .Worker }}</span>: {{ if .Blocked }}blocked{{ else }}healthy{{ end }}{{ if .Error }} ({{ .Error }}){{ end }}</li>
-          {{ end }}
-        </ul>
-        {{ end }}
-        <div class="actions">
-          <form method="post" action="/api/v1/refresh">
-            <button type="submit">Trigger Refresh</button>
-          </form>
-          <a class="button secondary" href="/api/v1/state">Open JSON State</a>
+    <div class="shell">
+      <section class="hero">
+        <div class="panel hero-main">
+          <div class="hero-kicker">Operations</div>
+          <div class="hero-title">
+            <div>
+              <h1>Go Harness Control Panel</h1>
+            </div>
+            {{ if .Dispatch.Blocked }}
+            <span class="pill warn">Dispatch blocked</span>
+            {{ else }}
+            <span class="pill ok">Dispatch healthy</span>
+            {{ end }}
+          </div>
+          <div class="hero-summary">
+            <div>Designed for triage first: what is blocked, what is running, and what needs operator attention next.</div>
+            <div>Last snapshot <span class="mono">{{ formatTime .GeneratedAt }}</span> · refreshed {{ relativeTime .GeneratedAt }}</div>
+          </div>
+          <div class="hero-meta">
+            <div class="meta-block">
+              <span class="meta-label">Workflow</span>
+              <div class="mono">{{ if .Workflow.Path }}{{ .Workflow.Path }}{{ else }}-{{ end }}</div>
+            </div>
+            <div class="meta-block">
+              <span class="meta-label">Review Workflow</span>
+              <div class="mono">{{ if .Workflow.ReviewPath }}{{ .Workflow.ReviewPath }}{{ else }}-{{ end }}</div>
+            </div>
+            <div class="meta-block">
+              <span class="meta-label">Env File</span>
+              <div class="mono">{{ if .Environment.DotEnvPath }}{{ .Environment.DotEnvPath }}{{ else }}-{{ end }}</div>
+              <div class="muted">{{ if .Environment.DotEnvPresent }}present{{ else }}missing{{ end }}</div>
+            </div>
+          </div>
+          <div class="actions">
+            <form method="post" action="/api/v1/refresh">
+              <button type="submit">Trigger Refresh</button>
+            </form>
+            <a class="button secondary" href="/api/v1/state">Open JSON State</a>
+          </div>
         </div>
-      </div>
-    </section>
 
-    <section class="stats">
-      <div class="panel">
-        <span class="stat-label">Running</span>
-        <span class="stat-value">{{ .Counts.Running }}</span>
-      </div>
-      <div class="panel">
-        <span class="stat-label">Retrying</span>
-        <span class="stat-value">{{ .Counts.Retrying }}</span>
-      </div>
-      <div class="panel">
-        <span class="stat-label">Completed</span>
-        <span class="stat-value">{{ len .Completed }}</span>
-      </div>
-      <div class="panel">
-        <span class="stat-label">Total Tokens</span>
-        <span class="stat-value">{{ .CodexTotals.TotalTokens }}</span>
-      </div>
-    </section>
-
-    <section class="grid">
-      <div class="panel">
-        <h2>Running</h2>
-        {{ if .Running }}
-        <table>
-          <thead>
-            <tr><th>Issue</th><th>Worker</th><th>Attempt</th><th>Session</th><th>Workspace</th></tr>
-          </thead>
-          <tbody>
-            {{ range .Running }}
-            <tr>
-              <td>
-                <div><strong>{{ .Issue.Identifier }}</strong></div>
-                <div>{{ .Issue.Title }}</div>
-                <div class="mono">{{ .Issue.State }}</div>
-              </td>
-              <td class="mono">{{ if .LiveSession }}{{ if .LiveSession.Worker }}{{ .LiveSession.Worker }}{{ else }}-{{ end }}{{ else }}-{{ end }}</td>
-              <td>{{ .Attempt }}</td>
-              <td class="mono">{{ if .LiveSession }}{{ .LiveSession.SessionID }}{{ else }}-{{ end }}</td>
-              <td class="mono">{{ .Workspace.Path }}</td>
-            </tr>
-            {{ end }}
-          </tbody>
-        </table>
-        {{ else }}
-        <p class="empty">No running issues.</p>
-        {{ end }}
-      </div>
-
-      <div class="panel">
-        <h2>Retry Queue</h2>
-        {{ if .Retrying }}
-        <table>
-          <thead>
-            <tr><th>Issue</th><th>Attempt</th><th>Reason</th><th>Due</th></tr>
-          </thead>
-          <tbody>
-            {{ range .Retrying }}
-            <tr>
-              <td><strong>{{ .Identifier }}</strong></td>
-              <td>{{ .Attempt }}</td>
-              <td>{{ .Reason }}</td>
-              <td class="mono">{{ formatTime .DueAt }}</td>
-            </tr>
-            {{ end }}
-          </tbody>
-        </table>
-        {{ else }}
-        <p class="empty">Retry queue is empty.</p>
-        {{ end }}
-      </div>
-
-      <div class="panel">
-        <h2>Completed</h2>
-        {{ if .Completed }}
-        <ul>
-          {{ range .Completed }}
-          <li class="mono">{{ . }}</li>
-          {{ end }}
-        </ul>
-        {{ else }}
-        <p class="empty">No completed issues in memory.</p>
-        {{ end }}
-      </div>
-
-      <div class="panel">
-        <h2>Recent Activity</h2>
-        {{ if .RecentActivity }}
-        <div class="timeline">
-          {{ range .RecentActivity }}
-          <div class="timeline-item">
-            <div class="timeline-head">
-              <div><strong>{{ if .Identifier }}{{ .Identifier }}{{ else }}-{{ end }}</strong> <span class="mono">{{ .Event }}</span></div>
-              <div class="timeline-meta mono">{{ formatTime .At }}</div>
+        <div class="panel">
+          <div class="section-head">
+            <h2>At A Glance</h2>
+            <span class="pill neutral">{{ attentionCount . }} attention</span>
+          </div>
+          <div class="stats">
+            <div class="stat">
+              <span class="stat-label">Running</span>
+              <div class="stat-value">{{ .Counts.Running }}</div>
+              <div class="stat-note">active issue workspaces</div>
             </div>
-            <div class="timeline-meta">
-              {{ if .StateBefore }}{{ .StateBefore }}{{ end }}{{ if and .StateBefore .StateAfter }} -> {{ end }}{{ if .StateAfter }}{{ .StateAfter }}{{ end }}
-              {{ if .Reason }} · reason={{ .Reason }}{{ end }}
-              {{ if .Attempt }} · attempt={{ .Attempt }}{{ end }}
+            <div class="stat">
+              <span class="stat-label">Retrying</span>
+              <div class="stat-value">{{ .Counts.Retrying }}</div>
+              <div class="stat-note">issues waiting to re-run</div>
             </div>
-            {{ if .Message }}<div>{{ .Message }}</div>{{ end }}
-            {{ if .LastError }}<div class="mono">{{ .LastError }}</div>{{ end }}
+            <div class="stat">
+              <span class="stat-label">Completed</span>
+              <div class="stat-value">{{ len .Completed }}</div>
+              <div class="stat-note">completed in memory</div>
+            </div>
+            <div class="stat">
+              <span class="stat-label">Total Tokens</span>
+              <div class="stat-value">{{ .CodexTotals.TotalTokens }}</div>
+              <div class="stat-note">{{ .CodexTotals.InputTokens }} in · {{ .CodexTotals.OutputTokens }} out</div>
+            </div>
+          </div>
+          {{ if .Dispatch.Workers }}
+          <div class="stack" style="margin-top:14px">
+            {{ range .Dispatch.Workers }}
+            <div class="system-row">
+              <strong>{{ .Worker }}</strong> · {{ if .Blocked }}blocked{{ else }}healthy{{ end }}{{ if .Error }} · {{ .Error }}{{ end }}
+            </div>
+            {{ end }}
           </div>
           {{ end }}
         </div>
-        {{ else }}
-        <p class="empty">No issue activity recorded yet.</p>
-        {{ end }}
-      </div>
+      </section>
 
-      <div class="panel">
-        <h2>Environment</h2>
-        {{ if .Environment.Entries }}
-        <table>
-          <thead>
-            <tr><th>Name</th><th>Source</th><th>Value</th></tr>
-          </thead>
-          <tbody>
-            {{ range .Environment.Entries }}
-            <tr>
-              <td class="mono">{{ .Name }}</td>
-              <td>{{ .Source }}</td>
-              <td class="mono">{{ if .Value }}{{ .Value }}{{ else }}-{{ end }}</td>
-            </tr>
+      <section class="layout">
+        <div class="column">
+          <div class="panel">
+            <div class="section-head">
+              <h2>Action Needed</h2>
+              <span class="muted">operator-first triage</span>
+            </div>
+            {{ if or .Dispatch.Blocked .Retrying }}
+            <div class="attention-list">
+              {{ if .Dispatch.Blocked }}
+              <div class="attention-item">
+                <div><strong>Dispatch blocked</strong></div>
+                <div>{{ .Dispatch.Error }}</div>
+              </div>
+              {{ end }}
+              {{ range .Retrying }}
+              <div class="attention-item">
+                <div><strong>{{ .Identifier }}</strong> <span class="pill warn">retry {{ .Attempt }}</span></div>
+                <div>{{ .Reason }} · next run {{ relativeTime .DueAt }}</div>
+                {{ if .LastError }}<div class="mono">{{ clip .LastError 180 }}</div>{{ end }}
+              </div>
+              {{ end }}
+            </div>
+            {{ else }}
+            <p class="empty">No active failures need attention.</p>
             {{ end }}
-          </tbody>
-        </table>
-        {{ else }}
-        <p class="empty">No tracked environment entries.</p>
-        {{ end }}
-      </div>
+          </div>
 
-      <div class="panel">
-        <h2>Rate Limits</h2>
-        {{ if .RateLimits }}
-        <ul>
-          {{ range .RateLimits }}
-          <li><strong>{{ .Provider }}</strong> <span class="mono">{{ formatTime .UpdatedAt }}</span></li>
-          {{ end }}
-        </ul>
-        {{ else }}
-        <p class="empty">No rate limit snapshots received yet.</p>
-        {{ end }}
-      </div>
-    </section>
+          <div class="panel">
+            <div class="section-head">
+              <h2>Active Issues</h2>
+              <span class="muted">{{ .Counts.Running }} running</span>
+            </div>
+            {{ if .Running }}
+            <div class="card-list">
+              {{ range .Running }}
+              <article class="issue-card">
+                <div class="issue-top">
+                  <div class="issue-title">
+                    <div><strong>{{ .Issue.Identifier }}</strong></div>
+                    <h3>{{ .Issue.Title }}</h3>
+                    <div><span class="pill">{{ .Issue.State }}</span></div>
+                  </div>
+                  <div class="stack" style="justify-items:end">
+                    <div class="pill neutral">{{ if .LiveSession }}{{ if .LiveSession.Worker }}{{ .LiveSession.Worker }}{{ else }}worker{{ end }}{{ else }}worker{{ end }}</div>
+                    <div class="muted">attempt {{ .Attempt }}{{ if .LiveSession }} · turn {{ .LiveSession.TurnCount }}{{ end }}</div>
+                  </div>
+                </div>
+                <div class="kvs">
+                  <div class="kv">
+                    <div class="kv-label">Live Summary</div>
+                    <div>{{ runningSummary . }}</div>
+                  </div>
+                  <div class="kv">
+                    <div class="kv-label">Last Activity</div>
+                    <div>{{ relativeTime (runningLastAt .) }}</div>
+                  </div>
+                  <div class="kv">
+                    <div class="kv-label">Session</div>
+                    <div class="mono">{{ if .LiveSession }}{{ if .LiveSession.SessionID }}{{ clip .LiveSession.SessionID 36 }}{{ else }}-{{ end }}{{ else }}-{{ end }}</div>
+                  </div>
+                  <div class="kv">
+                    <div class="kv-label">Workspace</div>
+                    <div class="mono">{{ basePath .Workspace.Path }}</div>
+                  </div>
+                  {{ if .LiveSession }}
+                  <div class="kv">
+                    <div class="kv-label">Tokens</div>
+                    <div>{{ .LiveSession.TotalTokens }}</div>
+                  </div>
+                  {{ end }}
+                  <div class="kv">
+                    <div class="kv-label">Started</div>
+                    <div>{{ relativeTime .StartedAt }}</div>
+                  </div>
+                </div>
+                {{ if .LastError }}
+                <div class="mono">{{ clip .LastError 180 }}</div>
+                {{ end }}
+              </article>
+              {{ end }}
+            </div>
+            {{ else }}
+            <p class="empty">No running issues.</p>
+            {{ end }}
+          </div>
+
+          <div class="panel">
+            <div class="section-head">
+              <h2>Retrying</h2>
+              <span class="muted">{{ .Counts.Retrying }} queued</span>
+            </div>
+            {{ if .Retrying }}
+            <div class="card-list">
+              {{ range .Retrying }}
+              <article class="issue-card warn">
+                <div class="issue-top">
+                  <div class="issue-title">
+                    <div><strong>{{ .Identifier }}</strong></div>
+                    <h3>{{ .Reason }}</h3>
+                  </div>
+                  <div class="pill warn">attempt {{ .Attempt }}</div>
+                </div>
+                <div class="kvs">
+                  <div class="kv">
+                    <div class="kv-label">Next Retry</div>
+                    <div>{{ relativeTime .DueAt }}</div>
+                    <div class="mono muted">{{ formatTime .DueAt }}</div>
+                  </div>
+                  <div class="kv">
+                    <div class="kv-label">Reason</div>
+                    <div>{{ .Reason }}</div>
+                  </div>
+                </div>
+                {{ if .LastError }}
+                <div class="mono">{{ clip .LastError 220 }}</div>
+                {{ end }}
+              </article>
+              {{ end }}
+            </div>
+            {{ else }}
+            <p class="empty">Retry queue is empty.</p>
+            {{ end }}
+          </div>
+        </div>
+
+        <div class="column">
+          <div class="panel">
+            <div class="section-head">
+              <h2>Timeline</h2>
+              <span class="muted">latest activity first</span>
+            </div>
+            {{ if .RecentActivity }}
+            <div class="timeline">
+              {{ range .RecentActivity }}
+              <div class="timeline-item">
+                <div class="timeline-head">
+                  <div><strong>{{ if .Identifier }}{{ .Identifier }}{{ else }}-{{ end }}</strong> <span class="mono">{{ eventLabel .Event }}</span></div>
+                  <div class="timeline-meta mono">{{ relativeTime .At }}</div>
+                </div>
+                <div>{{ clip (timelineSummary .) 220 }}</div>
+                <div class="timeline-meta">
+                  {{ formatTime .At }}
+                  {{ if .Attempt }} · attempt={{ .Attempt }}{{ end }}
+                  {{ if .Reason }} · reason={{ .Reason }}{{ end }}
+                </div>
+                {{ if .LastError }}<div class="mono">{{ clip .LastError 180 }}</div>{{ end }}
+              </div>
+              {{ end }}
+            </div>
+            {{ else }}
+            <p class="empty">No issue activity recorded yet.</p>
+            {{ end }}
+          </div>
+
+          <details class="panel">
+            <summary>System Details</summary>
+            <div class="details-body">
+              <div class="system-grid">
+                <div class="system-block">
+                  <h3>Environment</h3>
+                  {{ if .Environment.Entries }}
+                  <div class="system-list">
+                    {{ range .Environment.Entries }}
+                    <div class="system-row">
+                      <div class="mono">{{ .Name }}</div>
+                      <div>{{ .Source }}</div>
+                      <div class="mono muted">{{ if .Value }}{{ .Value }}{{ else }}-{{ end }}</div>
+                    </div>
+                    {{ end }}
+                  </div>
+                  {{ else }}
+                  <p class="empty">No tracked environment entries.</p>
+                  {{ end }}
+                </div>
+
+                <div class="system-block">
+                  <h3>Rate Limits</h3>
+                  {{ if .RateLimits }}
+                  <div class="system-list">
+                    {{ range .RateLimits }}
+                    <div class="system-row">
+                      <div><strong>{{ .Provider }}</strong></div>
+                      <div class="mono">{{ formatTime .UpdatedAt }}</div>
+                    </div>
+                    {{ end }}
+                  </div>
+                  {{ else }}
+                  <p class="empty">No rate limit snapshots received yet.</p>
+                  {{ end }}
+                </div>
+
+                <div class="system-block">
+                  <h3>Completed</h3>
+                  {{ if .Completed }}
+                  <div class="system-list">
+                    {{ range .Completed }}
+                    <div class="system-row mono">{{ . }}</div>
+                    {{ end }}
+                  </div>
+                  {{ else }}
+                  <p class="empty">No completed issues in memory.</p>
+                  {{ end }}
+                </div>
+              </div>
+            </div>
+          </details>
+        </div>
+      </section>
+    </div>
   </main>
 </body>
 </html>`))
@@ -426,4 +815,31 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 			"message": message,
 		},
 	})
+}
+
+func humanDuration(value time.Duration) string {
+	if value < time.Minute {
+		seconds := int(value.Round(time.Second) / time.Second)
+		if seconds < 1 {
+			seconds = 1
+		}
+		return fmt.Sprintf("%ds", seconds)
+	}
+	if value < time.Hour {
+		return fmt.Sprintf("%dm", int(value.Round(time.Minute)/time.Minute))
+	}
+	if value < 24*time.Hour {
+		hours := value / time.Hour
+		minutes := (value % time.Hour) / time.Minute
+		if minutes == 0 {
+			return fmt.Sprintf("%dh", hours)
+		}
+		return fmt.Sprintf("%dh %dm", hours, minutes)
+	}
+	days := value / (24 * time.Hour)
+	hours := (value % (24 * time.Hour)) / time.Hour
+	if hours == 0 {
+		return fmt.Sprintf("%dd", days)
+	}
+	return fmt.Sprintf("%dd %dh", days, hours)
 }

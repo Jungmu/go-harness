@@ -1,61 +1,10 @@
 ---
 tracker:
-  kind: linear
-  api_key: $LINEAR_API_KEY
-  project_slug: my-linear-project
   active_states:
     - In Review
-  terminal_states:
-    - Done
-    - Closed
-    - Cancelled
-    - Canceled
-    - Duplicate
-
-github:
-  # Accepts GitHub web or API URLs, for example https://github.com/ or https://github.krafton.com/
-  endpoint: https://github.com/
-  # Optional when `gh auth login --hostname github.com` is already configured.
-  token: $GITHUB_TOKEN
-  owner: your-org
-  repo: your-repo
-  base_branch: main
-
-polling:
-  interval_ms: 30000
-
-workspace:
-  root: $HOME/symphony-workspaces
-
-hooks:
-  after_create: |
-    test -n "$HARNESS_SOURCE_REPO" || { echo "HARNESS_SOURCE_REPO is required"; exit 1; }
-    git -C "$HARNESS_SOURCE_REPO" worktree add --detach "$PWD" main
-  before_run: git fetch --all --prune
-  after_run: git status --short
-  before_remove: |
-    test -n "$HARNESS_SOURCE_REPO" || exit 0
-    git -C "$HARNESS_SOURCE_REPO" worktree remove --force "$PWD"
-  timeout_ms: 60000
 
 agent:
-  max_concurrent_agents: 2
   max_turns: 1
-  max_retry_backoff_ms: 300000
-
-codex:
-  command: codex app-server
-  approval_policy: never
-  thread_sandbox: workspace-write
-  turn_sandbox_policy:
-    type: workspace-write
-  turn_timeout_ms: 3600000
-  read_timeout_ms: 5000
-  stall_timeout_ms: 300000
-
-logging:
-  level: info
-  capture_prompts: false
 ---
 
 You are reviewing the current workspace state for {{ issue.identifier }}.

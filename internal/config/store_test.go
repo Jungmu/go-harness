@@ -681,6 +681,196 @@ func TestValidateReviewWorkflowRejectsMismatchedSettings(t *testing.T) {
 	}
 }
 
+func TestStoreLoadAndValidateReviewWorkflowInheritsMainConfig(t *testing.T) {
+	root := t.TempDir()
+	reviewPath := filepath.Join(root, ReviewWorkflowFilename)
+	if err := os.WriteFile(reviewPath, []byte(`---
+tracker:
+  active_states:
+    - In Review
+agent:
+  max_turns: 1
+---
+Review prompt
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mainCfg := RuntimeConfig{
+		SourcePath:     "/repo/WORKFLOW.md",
+		PromptTemplate: "Main prompt",
+		Environment: EnvironmentConfig{
+			DotEnvPath:    "/repo/.env",
+			DotEnvPresent: true,
+			Entries: []EnvironmentEntry{
+				{Name: "LINEAR_API_KEY", Value: "<redacted>", Source: ".env"},
+				{Name: "GO_HARNESS_LIVE_LINEAR_PROJECT_SLUG", Value: "improve-harness", Source: ".env"},
+			},
+		},
+		Tracker: TrackerConfig{
+			Kind:           "linear",
+			Endpoint:       "https://api.linear.app/graphql",
+			APIKey:         "linear-token",
+			ProjectSlug:    "MAIN",
+			ActiveStates:   []string{"Todo", "In Progress"},
+			TerminalStates: []string{"Done", "Closed"},
+		},
+		GitHub: GitHubConfig{
+			Endpoint:   "https://api.github.com",
+			Token:      "github-token",
+			Owner:      "acme",
+			Repo:       "widgets",
+			BaseBranch: "main",
+		},
+		Polling:   PollingConfig{Interval: 30 * time.Second},
+		Workspace: WorkspaceConfig{Root: filepath.Join(root, "workspaces")},
+		Hooks: HooksConfig{
+			AfterCreate:  "echo after-create",
+			BeforeRun:    "echo before-run",
+			AfterRun:     "echo after-run",
+			BeforeRemove: "echo before-remove",
+			Timeout:      time.Minute,
+		},
+		Agent: AgentConfig{
+			MaxConcurrentAgents:        5,
+			MaxTurns:                   3,
+			MaxRetryBackoff:            5 * time.Minute,
+			MaxConcurrentAgentsByState: map[string]int{"in progress": 2},
+		},
+		Codex: CodexConfig{
+			Command:           "codex app-server",
+			ApprovalPolicy:    "never",
+			ThreadSandbox:     "danger-full-access",
+			TurnSandboxPolicy: map[string]any{"type": "danger-full-access"},
+			TurnTimeout:       time.Hour,
+			ReadTimeout:       5 * time.Second,
+			StallTimeout:      5 * time.Minute,
+		},
+		Logging: LoggingConfig{
+			Level:          "debug",
+			CapturePrompts: true,
+		},
+	}
+	mainCfg.Tracker.activeStateSet = makeStateSet(mainCfg.Tracker.ActiveStates)
+	mainCfg.Tracker.terminalStateSet = makeStateSet(mainCfg.Tracker.TerminalStates)
+
+	store := NewStore(workflow.NewLoader())
+	store.SetBaseConfig(func() RuntimeConfig { return mainCfg })
+	store.SetValidator(func(reviewCfg RuntimeConfig) error {
+		return ValidateReviewWorkflow(mainCfg, reviewCfg)
+	})
+
+	cfg, err := store.LoadAndValidate(reviewPath)
+	if err != nil {
+		t.Fatalf("LoadAndValidate() error = %v", err)
+	}
+	if cfg.SourcePath != reviewPath {
+		t.Fatalf("SourcePath = %q, want %q", cfg.SourcePath, reviewPath)
+	}
+	if cfg.PromptTemplate != "Review prompt" {
+		t.Fatalf("PromptTemplate = %q, want review prompt", cfg.PromptTemplate)
+	}
+	if cfg.GitHub.Owner != mainCfg.GitHub.Owner || cfg.GitHub.Repo != mainCfg.GitHub.Repo {
+		t.Fatalf("GitHub config not inherited: %#v", cfg.GitHub)
+	}
+	if cfg.Tracker.ProjectSlug != mainCfg.Tracker.ProjectSlug {
+		t.Fatalf("ProjectSlug = %q, want %q", cfg.Tracker.ProjectSlug, mainCfg.Tracker.ProjectSlug)
+	}
+	if cfg.Workspace.Root != mainCfg.Workspace.Root {
+		t.Fatalf("Workspace.Root = %q, want %q", cfg.Workspace.Root, mainCfg.Workspace.Root)
+	}
+	if cfg.Agent.MaxTurns != 1 {
+		t.Fatalf("Agent.MaxTurns = %d, want 1", cfg.Agent.MaxTurns)
+	}
+	if !cfg.Logging.CapturePrompts {
+		t.Fatal("Logging.CapturePrompts = false, want inherited true")
+	}
+	if len(cfg.Environment.Entries) != 2 {
+		t.Fatalf("Environment.Entries = %#v, want inherited entries", cfg.Environment.Entries)
+	}
+}
+
+func TestStoreReloadIfChangedReloadsWhenBaseConfigChanges(t *testing.T) {
+	root := t.TempDir()
+	reviewPath := filepath.Join(root, ReviewWorkflowFilename)
+	if err := os.WriteFile(reviewPath, []byte(`---
+tracker:
+  active_states:
+    - In Review
+---
+Review prompt
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	baseCfg := RuntimeConfig{
+		SourcePath: "/repo/WORKFLOW.md",
+		Tracker: TrackerConfig{
+			Kind:           "linear",
+			Endpoint:       "https://api.linear.app/graphql",
+			APIKey:         "linear-token",
+			ProjectSlug:    "MAIN",
+			ActiveStates:   []string{"Todo", "In Progress"},
+			TerminalStates: []string{"Done", "Closed"},
+		},
+		GitHub: GitHubConfig{
+			Endpoint:   "https://api.github.com",
+			Owner:      "acme",
+			Repo:       "widgets",
+			BaseBranch: "main",
+		},
+		Polling:   PollingConfig{Interval: 30 * time.Second},
+		Workspace: WorkspaceConfig{Root: filepath.Join(root, "workspaces-a")},
+		Hooks:     HooksConfig{Timeout: time.Minute},
+		Agent: AgentConfig{
+			MaxConcurrentAgents:        5,
+			MaxTurns:                   3,
+			MaxRetryBackoff:            5 * time.Minute,
+			MaxConcurrentAgentsByState: map[string]int{},
+		},
+		Codex: CodexConfig{
+			Command:           "codex app-server",
+			ApprovalPolicy:    "never",
+			ThreadSandbox:     "workspace-write",
+			TurnSandboxPolicy: map[string]any{"type": "workspace-write"},
+			TurnTimeout:       time.Hour,
+			ReadTimeout:       5 * time.Second,
+			StallTimeout:      5 * time.Minute,
+		},
+		Logging: LoggingConfig{Level: "info"},
+	}
+	baseCfg.Tracker.activeStateSet = makeStateSet(baseCfg.Tracker.ActiveStates)
+	baseCfg.Tracker.terminalStateSet = makeStateSet(baseCfg.Tracker.TerminalStates)
+
+	store := NewStore(workflow.NewLoader())
+	store.SetBaseConfig(func() RuntimeConfig { return baseCfg })
+	store.SetValidator(func(reviewCfg RuntimeConfig) error {
+		return ValidateReviewWorkflow(baseCfg, reviewCfg)
+	})
+
+	cfg, err := store.LoadAndValidate(reviewPath)
+	if err != nil {
+		t.Fatalf("LoadAndValidate() error = %v", err)
+	}
+	if cfg.Workspace.Root != baseCfg.Workspace.Root {
+		t.Fatalf("Workspace.Root = %q, want %q", cfg.Workspace.Root, baseCfg.Workspace.Root)
+	}
+
+	baseCfg.Workspace.Root = filepath.Join(root, "workspaces-b")
+	time.Sleep(20 * time.Millisecond)
+
+	reloaded, changed, err := store.ReloadIfChanged()
+	if err != nil {
+		t.Fatalf("ReloadIfChanged() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("ReloadIfChanged() changed = false, want true after base config change")
+	}
+	if reloaded.Workspace.Root != baseCfg.Workspace.Root {
+		t.Fatalf("Workspace.Root = %q, want %q", reloaded.Workspace.Root, baseCfg.Workspace.Root)
+	}
+}
+
 func TestStoreReloadIfChangedRunsValidatorWithoutFileChange(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("LINEAR_API_KEY", "linear-token")

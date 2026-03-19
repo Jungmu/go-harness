@@ -149,7 +149,7 @@ func TestHandlerDashboardRendersSnapshot(t *testing.T) {
 					},
 				},
 				Retrying: []domain.RetryEntry{
-					{Identifier: "ABC-2", Attempt: 3, Reason: "attempt_failed", DueAt: time.Date(2026, 3, 18, 9, 1, 0, 0, time.UTC)},
+					{Identifier: "ABC-2", Attempt: 3, Reason: "attempt_failed", DueAt: time.Date(2026, 3, 18, 9, 1, 0, 0, time.UTC), LastError: "git fetch failed: not a git repository"},
 				},
 				RecentActivity: []domain.TimelineEvent{
 					{At: time.Date(2026, 3, 18, 9, 0, 30, 0, time.UTC), Identifier: "ABC-1", Event: "issue_claimed", Attempt: 2, Message: "issue claimed for execution"},
@@ -172,7 +172,7 @@ func TestHandlerDashboardRendersSnapshot(t *testing.T) {
 		t.Fatalf("Content-Type = %q, want text/html", contentType)
 	}
 	body := res.Body.String()
-	for _, expected := range []string{"Go Harness", "Dispatch blocked", "/repo/WORKFLOW.md", "/repo/REVIEW-WORKFLOW.md", "/repo/.env", "LINEAR_API_KEY", "&lt;redacted&gt;", "GO_HARNESS_LIVE_LINEAR_PROJECT_SLUG", "coding", "review", "ABC-1", "ABC-2", "ABC-3", "Recent Activity", "issue_claimed", "tracker_state_transition", "Todo -> In Progress"} {
+	for _, expected := range []string{"Go Harness Control Panel", "Dispatch blocked", "/repo/WORKFLOW.md", "/repo/REVIEW-WORKFLOW.md", "/repo/.env", "LINEAR_API_KEY", "&lt;redacted&gt;", "GO_HARNESS_LIVE_LINEAR_PROJECT_SLUG", "coding", "review", "ABC-1", "ABC-2", "ABC-3", "Action Needed", "Active Issues", "Retrying", "Timeline", "System Details", "issue claimed", "tracker state transition", "Todo -&gt; In Progress", "git fetch failed: not a git repository"} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("dashboard body missing %q: %q", expected, body)
 		}

@@ -383,7 +383,7 @@ claim이 해제되었고 다시 poll 결과에 따라 재판단된다.
 
 1. logger와 observability sink를 초기화한다.
 2. `WORKFLOW.md`를 찾고 로드한다.
-3. 같은 디렉터리에 `REVIEW-WORKFLOW.md`가 있으면 함께 로드한다.
+3. 같은 디렉터리에 `REVIEW-WORKFLOW.md`가 있으면 함께 로드한다. review workflow는 main workflow effective config를 상속하고 declared override만 덮어쓴다.
 4. startup validation을 수행한다.
 5. `github.token`이 없으면 `github.endpoint`에서 host를 계산해 `gh auth token --hostname <host>` warmup을 수행한다.
 6. invalid config거나 auth warmup이 실패하면 서비스 시작을 거부한다.
@@ -460,7 +460,7 @@ loader 동작은 다음과 같다.
 
 - 파일을 읽지 못하면 `missing_workflow_file` 오류를 반환한다.
 - workflow file은 저장소 소유 설정이며 version-controlled resource로 간주한다.
-- 같은 디렉터리에 `REVIEW-WORKFLOW.md`가 있으면 review lane이 그 파일을 별도 설정/프롬프트 계약으로 사용한다.
+- 같은 디렉터리에 `REVIEW-WORKFLOW.md`가 있으면 review lane이 main workflow 설정을 상속한 뒤 그 파일의 override와 prompt를 사용한다.
 
 ### 12.2 파일 형식과 파싱 규칙
 

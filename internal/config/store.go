@@ -2,6 +2,8 @@ package config
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -42,12 +44,14 @@ var (
 type Store struct {
 	loader      *workflow.Loader
 	validator   func(RuntimeConfig) error
+	baseConfig  func() RuntimeConfig
 	mu          sync.RWMutex
 	path        string
 	envPath     string
 	cfg         RuntimeConfig
 	workflowMod time.Time
 	dotEnvState fileState
+	baseSig     string
 	err         error
 	ready       bool
 }
@@ -172,6 +176,12 @@ func (s *Store) SetValidator(validator func(RuntimeConfig) error) {
 	s.validator = validator
 }
 
+func (s *Store) SetBaseConfig(baseConfig func() RuntimeConfig) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.baseConfig = baseConfig
+}
+
 func (s *Store) LoadAndValidate(path string) (RuntimeConfig, error) {
 	resolvedPath, err := resolveWorkflowPath(path)
 	if err != nil {
@@ -180,6 +190,10 @@ func (s *Store) LoadAndValidate(path string) (RuntimeConfig, error) {
 	envPath := executableDotEnvPath()
 
 	cfg, workflowMod, dotEnvState, err := s.loadConfig(resolvedPath, envPath)
+	if err != nil {
+		return RuntimeConfig{}, err
+	}
+	baseSig, err := s.currentBaseSignature()
 	if err != nil {
 		return RuntimeConfig{}, err
 	}
@@ -197,6 +211,7 @@ func (s *Store) LoadAndValidate(path string) (RuntimeConfig, error) {
 	s.cfg = cfg
 	s.workflowMod = workflowMod
 	s.dotEnvState = dotEnvState
+	s.baseSig = baseSig
 	s.err = nil
 	s.ready = true
 
@@ -219,6 +234,7 @@ func (s *Store) ReloadIfChanged() (RuntimeConfig, bool, error) {
 	envPath := s.envPath
 	lastWorkflowMod := s.workflowMod
 	lastDotEnvState := s.dotEnvState
+	lastBaseSig := s.baseSig
 	current := s.cfg
 	validator := s.validator
 	s.mu.RUnlock()
@@ -238,21 +254,37 @@ func (s *Store) ReloadIfChanged() (RuntimeConfig, bool, error) {
 		return current, false, err
 	}
 	if info.ModTime().Equal(lastWorkflowMod) && dotEnvState == lastDotEnvState {
-		if validator != nil {
-			if err := validator(current); err != nil {
-				s.mu.Lock()
-				s.err = err
-				s.mu.Unlock()
-				return current, false, err
-			}
+		baseSig, err := s.currentBaseSignature()
+		if err != nil {
 			s.mu.Lock()
-			s.err = nil
+			s.err = err
 			s.mu.Unlock()
+			return current, false, err
 		}
-		return current, false, nil
+		if baseSig == lastBaseSig {
+			if validator != nil {
+				if err := validator(current); err != nil {
+					s.mu.Lock()
+					s.err = err
+					s.mu.Unlock()
+					return current, false, err
+				}
+				s.mu.Lock()
+				s.err = nil
+				s.mu.Unlock()
+			}
+			return current, false, nil
+		}
 	}
 
 	cfg, workflowMod, dotEnvState, err := s.loadConfig(path, envPath)
+	if err != nil {
+		s.mu.Lock()
+		s.err = err
+		s.mu.Unlock()
+		return current, false, err
+	}
+	baseSig, err := s.currentBaseSignature()
 	if err != nil {
 		s.mu.Lock()
 		s.err = err
@@ -273,6 +305,7 @@ func (s *Store) ReloadIfChanged() (RuntimeConfig, bool, error) {
 	s.cfg = cfg
 	s.workflowMod = workflowMod
 	s.dotEnvState = dotEnvState
+	s.baseSig = baseSig
 	s.err = nil
 
 	return cfg, true, nil
@@ -621,9 +654,33 @@ func (s *Store) loadConfig(path, envPath string) (RuntimeConfig, time.Time, file
 	}
 	env := envResolver{dotEnv: dotEnv}
 
-	cfg := RuntimeConfig{
-		SourcePath:     definition.SourcePath,
-		PromptTemplate: definition.PromptTemplate,
+	cfg := defaultRuntimeConfig(definition.SourcePath, definition.PromptTemplate, envPath, dotEnvState)
+	if baseCfg, ok, err := s.currentBaseConfig(); err != nil {
+		return RuntimeConfig{}, time.Time{}, fileState{}, err
+	} else if ok {
+		cfg = inheritRuntimeConfig(baseCfg, definition.SourcePath, definition.PromptTemplate, envPath, dotEnvState)
+	}
+
+	if err := applyConfig(&cfg, definition.Config, env); err != nil {
+		return RuntimeConfig{}, time.Time{}, fileState{}, err
+	}
+	if err := validateAndNormalize(&cfg, env); err != nil {
+		return RuntimeConfig{}, time.Time{}, fileState{}, err
+	}
+	cfg.Environment.Entries = mergeEnvironmentEntries(cfg.Environment.Entries, buildEnvironmentEntries(definition.Config, env))
+
+	info, err := os.Stat(definition.SourcePath)
+	if err != nil {
+		return RuntimeConfig{}, time.Time{}, fileState{}, err
+	}
+
+	return cfg, info.ModTime(), dotEnvState, nil
+}
+
+func defaultRuntimeConfig(sourcePath, promptTemplate, envPath string, dotEnvState fileState) RuntimeConfig {
+	return RuntimeConfig{
+		SourcePath:     sourcePath,
+		PromptTemplate: promptTemplate,
 		Environment: EnvironmentConfig{
 			DotEnvPath:    envPath,
 			DotEnvPresent: dotEnvState.exists,
@@ -661,21 +718,114 @@ func (s *Store) loadConfig(path, envPath string) (RuntimeConfig, time.Time, file
 			CapturePrompts: false,
 		},
 	}
+}
 
-	if err := applyConfig(&cfg, definition.Config, env); err != nil {
-		return RuntimeConfig{}, time.Time{}, fileState{}, err
-	}
-	if err := validateAndNormalize(&cfg, env); err != nil {
-		return RuntimeConfig{}, time.Time{}, fileState{}, err
-	}
-	cfg.Environment.Entries = buildEnvironmentEntries(definition.Config, env)
+func inheritRuntimeConfig(base RuntimeConfig, sourcePath, promptTemplate, envPath string, dotEnvState fileState) RuntimeConfig {
+	cfg := cloneRuntimeConfig(base)
+	cfg.SourcePath = sourcePath
+	cfg.PromptTemplate = promptTemplate
+	cfg.Environment.DotEnvPath = envPath
+	cfg.Environment.DotEnvPresent = dotEnvState.exists
+	return cfg
+}
 
-	info, err := os.Stat(definition.SourcePath)
+func cloneRuntimeConfig(cfg RuntimeConfig) RuntimeConfig {
+	cloned := cfg
+	cloned.Environment.Entries = append([]EnvironmentEntry{}, cfg.Environment.Entries...)
+	cloned.Tracker.ActiveStates = append([]string{}, cfg.Tracker.ActiveStates...)
+	cloned.Tracker.TerminalStates = append([]string{}, cfg.Tracker.TerminalStates...)
+	cloned.Tracker.activeStateSet = cloneStateSet(cfg.Tracker.activeStateSet)
+	cloned.Tracker.terminalStateSet = cloneStateSet(cfg.Tracker.terminalStateSet)
+	cloned.Agent.MaxConcurrentAgentsByState = cloneIntMap(cfg.Agent.MaxConcurrentAgentsByState)
+	cloned.Codex.TurnSandboxPolicy = cloneAnyMap(cfg.Codex.TurnSandboxPolicy)
+	return cloned
+}
+
+func cloneStateSet(value map[string]struct{}) map[string]struct{} {
+	if len(value) == 0 {
+		return nil
+	}
+	cloned := make(map[string]struct{}, len(value))
+	for key, item := range value {
+		cloned[key] = item
+	}
+	return cloned
+}
+
+func cloneIntMap(value map[string]int) map[string]int {
+	if len(value) == 0 {
+		return map[string]int{}
+	}
+	cloned := make(map[string]int, len(value))
+	for key, item := range value {
+		cloned[key] = item
+	}
+	return cloned
+}
+
+func cloneAnyMap(value map[string]any) map[string]any {
+	if len(value) == 0 {
+		return nil
+	}
+	line, err := json.Marshal(value)
 	if err != nil {
-		return RuntimeConfig{}, time.Time{}, fileState{}, err
+		return nil
 	}
+	var cloned map[string]any
+	if err := json.Unmarshal(line, &cloned); err != nil {
+		return nil
+	}
+	return cloned
+}
 
-	return cfg, info.ModTime(), dotEnvState, nil
+func mergeEnvironmentEntries(base, overlay []EnvironmentEntry) []EnvironmentEntry {
+	if len(base) == 0 {
+		return append([]EnvironmentEntry{}, overlay...)
+	}
+	if len(overlay) == 0 {
+		return append([]EnvironmentEntry{}, base...)
+	}
+	merged := append([]EnvironmentEntry{}, base...)
+	indexByName := make(map[string]int, len(merged))
+	for i, entry := range merged {
+		indexByName[entry.Name] = i
+	}
+	for _, entry := range overlay {
+		if idx, ok := indexByName[entry.Name]; ok {
+			merged[idx] = entry
+			continue
+		}
+		indexByName[entry.Name] = len(merged)
+		merged = append(merged, entry)
+	}
+	return merged
+}
+
+func (s *Store) currentBaseConfig() (RuntimeConfig, bool, error) {
+	s.mu.RLock()
+	baseConfig := s.baseConfig
+	s.mu.RUnlock()
+	if baseConfig == nil {
+		return RuntimeConfig{}, false, nil
+	}
+	return baseConfig(), true, nil
+}
+
+func (s *Store) currentBaseSignature() (string, error) {
+	baseCfg, ok, err := s.currentBaseConfig()
+	if err != nil || !ok {
+		return "", err
+	}
+	return runtimeConfigSignature(baseCfg)
+}
+
+func runtimeConfigSignature(cfg RuntimeConfig) (string, error) {
+	normalized := cloneRuntimeConfig(cfg)
+	line, err := json.Marshal(normalized)
+	if err != nil {
+		return "", err
+	}
+	return string(bytes.TrimSpace(line)), nil
 }
 
 func mapValue(raw map[string]any, key string) map[string]any {

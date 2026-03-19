@@ -111,12 +111,13 @@ Unknown variables and filters return `workflow_template_render_error`.
 ## Review Workflow Contract
 
 - `REVIEW-WORKFLOW.md` is optional and is discovered only as a sibling of the active `WORKFLOW.md`.
+- The review workflow starts from the main workflow's effective config and applies only the overrides declared in `REVIEW-WORKFLOW.md`.
 - The review workflow must use `tracker.kind = linear`.
 - The review workflow must use the same `github.endpoint`, `github.owner`, `github.repo`, `github.base_branch`, and `github.remote_url` as the main workflow.
 - The review workflow must use the same `tracker.project_slug`, `workspace.root`, and `tracker.terminal_states` set as the main workflow.
 - The review workflow must use `tracker.active_states = ["In Review"]`.
 - An invalid `REVIEW-WORKFLOW.md` blocks daemon startup if the file exists.
-- Review reloads are independent from the main workflow. An invalid review reload blocks only review dispatch.
+- Review reloads still have their own file validation, but inherited main-workflow config changes also trigger a review effective-config reload. An invalid review reload blocks only review dispatch.
 - Review prompts are rendered from the `REVIEW-WORKFLOW.md` body template and then extended with an internal review contract suffix.
 - Review turns do not use continuation. Each review attempt runs exactly one turn.
 

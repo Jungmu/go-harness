@@ -84,6 +84,9 @@ func runDaemon(args []string) int {
 	}
 	if foundReview {
 		reviewStore := config.NewStore(workflow.NewLoader())
+		reviewStore.SetBaseConfig(func() config.RuntimeConfig {
+			return store.Current()
+		})
 		reviewStore.SetValidator(func(reviewCfg config.RuntimeConfig) error {
 			return config.ValidateReviewWorkflow(store.Current(), reviewCfg)
 		})

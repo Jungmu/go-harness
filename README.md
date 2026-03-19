@@ -75,6 +75,7 @@ Each release also publishes a matching `.sha256` file for checksum verification.
 - a Linear API key
 - a `WORKFLOW.md` file for the repository you want the harness to operate against
 - an optional sibling `REVIEW-WORKFLOW.md` if you want the daemon to process `In Review` issues
+- `REVIEW-WORKFLOW.md` inherits the main workflow's shared settings and usually only needs review-specific overrides such as `tracker.active_states` and `agent.max_turns`
 
 ## Build From Source
 
@@ -156,6 +157,7 @@ Important:
 - do not run the daemon with cwd set to this source repository unless this repository itself is the target repo
 - the agent session runs inside per-issue workspaces under `workspace.root`
 - if `REVIEW-WORKFLOW.md` exists next to the active `WORKFLOW.md`, the daemon starts a second in-process review orchestrator
+- the review workflow overlays the main workflow config, so shared tracker, github, workspace, hook, codex, and logging settings do not need to be repeated
 - set `logging.level: debug` if you want a poll heartbeat and candidate-count logs while the daemon is idle
 - set `logging.capture_prompts: true` only when you need raw Codex exchange logs on disk for debugging
 - startup logs print the resolved workflow path, `.env` path, and all tracked environment entries with sensitive values redacted
@@ -187,7 +189,7 @@ The root dashboard auto-refreshes and shows the active workflow file paths, `.en
 Execution history:
 
 - the harness records issue-level timeline events in memory and exposes them as `recent_activity` in `GET /api/v1/state`
-- the dashboard renders the same timeline in the `Recent Activity` panel
+- the dashboard renders a human-readable operations view with attention items, retry errors, live session summaries, and the same recent timeline
 - `GET /api/v1/issues/{identifier}` returns the per-issue in-memory history buffer, not just the global recent-activity window
 - the harness also appends per-issue JSONL history files under `workspace.root/.harness-history/`
 - if `logging.capture_prompts` is enabled, the runner also appends raw prompt/stdin/stdout/stderr transcript files under `workspace.root/.harness-prompts/`
@@ -197,6 +199,7 @@ Execution history:
 Review lane:
 
 - if `REVIEW-WORKFLOW.md` exists next to the active `WORKFLOW.md`, the daemon starts a review lane that polls `In Review` issues
+- the review lane inherits shared settings from the main workflow and applies only the overrides declared in `REVIEW-WORKFLOW.md`
 - the review lane runs one Codex turn per attempt and expects `.harness/review-result.json` plus `.harness/review-notes.md` in the issue workspace
 - a review verdict with `decision="done"` transitions the issue to `Done`
 - a review verdict with `decision="todo"` transitions the issue back to `Todo` and preserves the workspace
