@@ -15,16 +15,18 @@ import (
 )
 
 type Manager struct {
-	root   string
-	hooks  config.HooksConfig
-	logger *slog.Logger
+	root       string
+	sourcePath string
+	hooks      config.HooksConfig
+	logger     *slog.Logger
 }
 
-func NewManager(root string, hooks config.HooksConfig, logger *slog.Logger) *Manager {
+func NewManager(root, sourcePath string, hooks config.HooksConfig, logger *slog.Logger) *Manager {
 	return &Manager{
-		root:   root,
-		hooks:  hooks,
-		logger: logger,
+		root:       root,
+		sourcePath: sourcePath,
+		hooks:      hooks,
+		logger:     logger,
 	}
 }
 
@@ -61,6 +63,7 @@ func (m *Manager) Prepare(ctx context.Context, issue domain.Issue) (domain.Works
 
 	if workspace.CreatedNow {
 		if err := m.runHook(ctx, workspace.Path, m.hooks.AfterCreate); err != nil {
+			m.cleanupFailedPrepare(workspace.Path)
 			return domain.Workspace{}, fmt.Errorf("after_create hook failed: %w", err)
 		}
 	}
@@ -106,6 +109,7 @@ func (m *Manager) runHook(ctx context.Context, cwd, script string) error {
 
 	cmd := exec.CommandContext(hookCtx, "bash", "-lc", script)
 	cmd.Dir = cwd
+	cmd.Env = m.hookEnv()
 
 	var combined bytes.Buffer
 	cmd.Stdout = &combined
@@ -120,6 +124,68 @@ func (m *Manager) runHook(ctx context.Context, cwd, script string) error {
 	}
 
 	return nil
+}
+
+func (m *Manager) cleanupFailedPrepare(path string) {
+	if err := m.ensureSafePath(path); err != nil {
+		return
+	}
+	if err := os.RemoveAll(path); err != nil && m.logger != nil {
+		m.logger.Warn("failed to remove partially prepared workspace", slog.String("workspace", path), slog.Any("error", err))
+	}
+}
+
+func (m *Manager) hookEnv() []string {
+	env := append([]string{}, os.Environ()...)
+	if strings.TrimSpace(m.sourcePath) == "" {
+		return env
+	}
+
+	workflowPath := filepath.Clean(m.sourcePath)
+	workflowDir := filepath.Dir(workflowPath)
+	env = upsertEnv(env, "HARNESS_WORKFLOW_PATH", workflowPath)
+	env = upsertEnv(env, "HARNESS_WORKFLOW_DIR", workflowDir)
+
+	if repoRoot, ok := discoverSourceRepoRoot(workflowPath); ok {
+		env = upsertEnv(env, "HARNESS_SOURCE_REPO", repoRoot)
+		// Keep the old variable available so previously copied local workflows do not break.
+		env = upsertEnv(env, "GO_HARNESS_SOURCE_REPO", repoRoot)
+	}
+
+	return env
+}
+
+func discoverSourceRepoRoot(workflowPath string) (string, bool) {
+	if strings.TrimSpace(workflowPath) == "" {
+		return "", false
+	}
+
+	dir := filepath.Dir(filepath.Clean(workflowPath))
+	for {
+		gitPath := filepath.Join(dir, ".git")
+		if info, err := os.Stat(gitPath); err == nil {
+			if info.IsDir() || info.Mode().IsRegular() {
+				return dir, true
+			}
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
+}
+
+func upsertEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	for i, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			env[i] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
 }
 
 func (m *Manager) ensureSafePath(path string) error {

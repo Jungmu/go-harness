@@ -79,6 +79,16 @@ Unknown keys are ignored.
 - If `github.remote_url` is omitted, the runtime derives the push remote from `github.endpoint`, `github.owner`, and `github.repo`.
 - If no workflow path is passed and the current working directory has no `WORKFLOW.md`, the loader falls back to the executable directory before returning `missing_workflow_file`.
 
+## Workspace Hook Environment
+
+- Workspace hooks run with the issue workspace as `cwd`.
+- Workspace hooks inherit the process environment.
+- The runtime also injects `HARNESS_WORKFLOW_PATH` with the resolved workflow file path.
+- The runtime also injects `HARNESS_WORKFLOW_DIR` with the directory that contains the active workflow file.
+- If the runtime finds a `.git` entry while walking upward from `HARNESS_WORKFLOW_DIR`, it also injects `HARNESS_SOURCE_REPO` with that repository root.
+- For compatibility with older local copies of the bundled workflow files, the runtime also injects `GO_HARNESS_SOURCE_REPO` with the same value as `HARNESS_SOURCE_REPO`.
+- If `after_create` fails for a newly created workspace, the runtime removes that partially prepared workspace directory before returning the error.
+
 ## Prompt Rendering
 
 The current renderer supports:

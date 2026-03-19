@@ -19,7 +19,7 @@ func TestManagerPrepareAfterRunAndCleanup(t *testing.T) {
 
 	root := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	manager := NewManager(root, config.HooksConfig{
+	manager := NewManager(root, "", config.HooksConfig{
 		AfterCreate: `printf created > created.txt`,
 		BeforeRun:   `printf before > before.txt`,
 		AfterRun:    `printf after > after.txt`,
@@ -68,12 +68,84 @@ func TestManagerCleanupRejectsSymlinkWorkspace(t *testing.T) {
 		t.Fatalf("Symlink() error = %v", err)
 	}
 
-	manager := NewManager(root, config.HooksConfig{Timeout: time.Second}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	manager := NewManager(root, "", config.HooksConfig{Timeout: time.Second}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	err := manager.Cleanup(context.Background(), domain.Workspace{Path: linkPath, WorkspaceKey: "ABC-1"})
 	if err == nil {
 		t.Fatal("Cleanup() error = nil, want symlink rejection")
 	}
 	if !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("Cleanup() error = %v, want symlink error", err)
+	}
+}
+
+func TestManagerInjectsWorkflowHookEnv(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	if err := os.Mkdir(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("Mkdir(.git) error = %v", err)
+	}
+	workflowDir := filepath.Join(repoRoot, "bin")
+	if err := os.MkdirAll(workflowDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(workflowDir) error = %v", err)
+	}
+	workflowPath := filepath.Join(workflowDir, "WORKFLOW.md")
+	if err := os.WriteFile(workflowPath, []byte("---\n---\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(workflowPath) error = %v", err)
+	}
+
+	root := t.TempDir()
+	manager := NewManager(root, workflowPath, config.HooksConfig{
+		AfterCreate: `printf '%s\n%s\n%s\n%s' "$HARNESS_SOURCE_REPO" "$GO_HARNESS_SOURCE_REPO" "$HARNESS_WORKFLOW_PATH" "$HARNESS_WORKFLOW_DIR" > hook-env.txt`,
+		Timeout:     time.Second,
+	}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+
+	workspace, err := manager.Prepare(context.Background(), domain.Issue{Identifier: "JON-66"})
+	if err != nil {
+		t.Fatalf("Prepare() error = %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(workspace.Path, "hook-env.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile(hook-env.txt) error = %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("hook env lines = %d, want 4", len(lines))
+	}
+	if lines[0] != repoRoot {
+		t.Fatalf("HARNESS_SOURCE_REPO = %q, want %q", lines[0], repoRoot)
+	}
+	if lines[1] != repoRoot {
+		t.Fatalf("GO_HARNESS_SOURCE_REPO = %q, want %q", lines[1], repoRoot)
+	}
+	if lines[2] != workflowPath {
+		t.Fatalf("HARNESS_WORKFLOW_PATH = %q, want %q", lines[2], workflowPath)
+	}
+	if lines[3] != workflowDir {
+		t.Fatalf("HARNESS_WORKFLOW_DIR = %q, want %q", lines[3], workflowDir)
+	}
+}
+
+func TestManagerPrepareRemovesWorkspaceAfterAfterCreateFailure(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	manager := NewManager(root, "", config.HooksConfig{
+		AfterCreate: `echo broken >&2; exit 1`,
+		Timeout:     time.Second,
+	}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+
+	_, err := manager.Prepare(context.Background(), domain.Issue{Identifier: "JON-66"})
+	if err == nil {
+		t.Fatal("Prepare() error = nil, want after_create failure")
+	}
+	if !strings.Contains(err.Error(), "after_create hook failed") {
+		t.Fatalf("Prepare() error = %v, want after_create failure", err)
+	}
+
+	workspacePath := filepath.Join(root, "JON-66")
+	if _, statErr := os.Stat(workspacePath); !os.IsNotExist(statErr) {
+		t.Fatalf("workspace exists after after_create failure: %v", statErr)
 	}
 }

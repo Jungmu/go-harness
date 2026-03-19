@@ -871,6 +871,8 @@ Execution contract:
   `cwd`.
 - On POSIX systems, `sh -lc <script>` (or a stricter equivalent such as `bash -lc <script>`) is a
   conforming default.
+- Implementations may inject workflow-derived helper environment variables for hooks. If they do,
+  they should document the variable names and derivation rules.
 - Hook timeout uses `hooks.timeout_ms`; default: `60000 ms`.
 - Log hook start, failures, and timeouts.
 

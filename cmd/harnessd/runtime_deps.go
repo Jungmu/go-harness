@@ -50,17 +50,17 @@ type dynamicWorkspaceManager struct {
 
 func (d *dynamicWorkspaceManager) Prepare(ctx context.Context, issue domain.Issue) (domain.Workspace, error) {
 	cfg := d.store.Current()
-	return workspace.NewManager(cfg.Workspace.Root, cfg.Hooks, d.logger).Prepare(ctx, issue)
+	return workspace.NewManager(cfg.Workspace.Root, cfg.SourcePath, cfg.Hooks, d.logger).Prepare(ctx, issue)
 }
 
 func (d *dynamicWorkspaceManager) AfterRun(ctx context.Context, issueWorkspace domain.Workspace) error {
 	cfg := d.store.Current()
-	return workspace.NewManager(cfg.Workspace.Root, cfg.Hooks, d.logger).AfterRun(ctx, issueWorkspace)
+	return workspace.NewManager(cfg.Workspace.Root, cfg.SourcePath, cfg.Hooks, d.logger).AfterRun(ctx, issueWorkspace)
 }
 
 func (d *dynamicWorkspaceManager) Cleanup(ctx context.Context, issueWorkspace domain.Workspace) error {
 	cfg := d.store.Current()
-	return workspace.NewManager(cfg.Workspace.Root, cfg.Hooks, d.logger).Cleanup(ctx, issueWorkspace)
+	return workspace.NewManager(cfg.Workspace.Root, cfg.SourcePath, cfg.Hooks, d.logger).Cleanup(ctx, issueWorkspace)
 }
 
 type dynamicRunner struct {

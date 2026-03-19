@@ -527,6 +527,7 @@ unknown key는 forward compatibility를 위해 무시한다.
 - `before_run`
 - `after_run`
 - `before_remove`
+- 새로 만든 workspace에서 `after_create`가 실패하면 부분 생성 directory를 제거하고 에러를 반환한다
 - `timeout_ms`
   - 기본값: `60000`
 
@@ -664,12 +665,10 @@ workspace:
 hooks:
   timeout_ms: 60000
   after_create: |
-    test -n "$HARNESS_SOURCE_REPO" || { echo "HARNESS_SOURCE_REPO is required"; exit 1; }
     git -C "$HARNESS_SOURCE_REPO" worktree add --detach "$PWD" main
   before_run: |
     git status --short
   before_remove: |
-    test -n "$HARNESS_SOURCE_REPO" || exit 0
     git -C "$HARNESS_SOURCE_REPO" worktree remove --force "$PWD"
 agent:
   max_concurrent_agents: 10
