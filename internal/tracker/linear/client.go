@@ -142,7 +142,15 @@ func NewClient(httpClient *http.Client, cfg config.TrackerConfig) *Client {
 }
 
 func (c *Client) PollCandidates(ctx context.Context) ([]domain.Issue, error) {
-	if len(c.cfg.ActiveStates) == 0 {
+	return c.pollProjectIssues(ctx, c.cfg.ActiveStates)
+}
+
+func (c *Client) PollTerminalIssues(ctx context.Context) ([]domain.Issue, error) {
+	return c.pollProjectIssues(ctx, c.cfg.TerminalStates)
+}
+
+func (c *Client) pollProjectIssues(ctx context.Context, stateNames []string) ([]domain.Issue, error) {
+	if len(stateNames) == 0 {
 		return []domain.Issue{}, nil
 	}
 
@@ -153,10 +161,10 @@ func (c *Client) PollCandidates(ctx context.Context) ([]domain.Issue, error) {
 	if strings.TrimSpace(projectSlug) == "" {
 		return nil, fmt.Errorf("linear project not found for tracker.project_slug=%q", c.cfg.ProjectSlug)
 	}
-	return c.pollCandidatesByProjectRef(ctx, projectSlug)
+	return c.pollIssuesByProjectRef(ctx, projectSlug, stateNames)
 }
 
-func (c *Client) pollCandidatesByProjectRef(ctx context.Context, projectSlug string) ([]domain.Issue, error) {
+func (c *Client) pollIssuesByProjectRef(ctx context.Context, projectSlug string, stateNames []string) ([]domain.Issue, error) {
 	var (
 		afterCursor string
 		allIssues   []domain.Issue
@@ -167,7 +175,7 @@ func (c *Client) pollCandidatesByProjectRef(ctx context.Context, projectSlug str
 			Query: pollBySlugQuery,
 			Variables: map[string]any{
 				"projectRef":    projectSlug,
-				"stateNames":    c.cfg.ActiveStates,
+				"stateNames":    stateNames,
 				"first":         defaultPageSize,
 				"relationFirst": defaultPageSize,
 				"after":         nilIfEmpty(afterCursor),

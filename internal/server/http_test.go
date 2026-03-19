@@ -19,7 +19,7 @@ func TestHandlerStateIssueAndRefreshEndpoints(t *testing.T) {
 		func() domain.StateSnapshot {
 			return domain.StateSnapshot{
 				GeneratedAt: time.Date(2026, 3, 18, 9, 0, 0, 0, time.UTC),
-				Workflow:    domain.WorkflowStatus{Path: "/repo/WORKFLOW.md"},
+				Workflow:    domain.WorkflowStatus{Path: "/repo/WORKFLOW.md", ReviewPath: "/repo/REVIEW-WORKFLOW.md"},
 				Environment: domain.EnvironmentStatus{
 					DotEnvPath:    "/repo/.env",
 					DotEnvPresent: true,
@@ -27,8 +27,15 @@ func TestHandlerStateIssueAndRefreshEndpoints(t *testing.T) {
 						{Name: "LINEAR_API_KEY", Value: "<redacted>", Source: ".env"},
 					},
 				},
-				Counts:   domain.SnapshotCounts{Running: 1},
-				Dispatch: domain.DispatchStatus{Blocked: true, Error: "invalid workflow"},
+				Counts: domain.SnapshotCounts{Running: 1},
+				Dispatch: domain.DispatchStatus{
+					Blocked: true,
+					Error:   "review: invalid workflow",
+					Workers: []domain.WorkerDispatchStatus{
+						{Worker: "coding", Blocked: false},
+						{Worker: "review", Blocked: true, Error: "invalid workflow"},
+					},
+				},
 				RecentActivity: []domain.TimelineEvent{
 					{At: time.Date(2026, 3, 18, 8, 59, 0, 0, time.UTC), Identifier: "ABC-1", Event: "issue_claimed"},
 				},
@@ -68,6 +75,9 @@ func TestHandlerStateIssueAndRefreshEndpoints(t *testing.T) {
 	}
 	if !strings.Contains(healthRes.Body.String(), `/repo/WORKFLOW.md`) {
 		t.Fatalf("GET /healthz body = %q, want workflow path", healthRes.Body.String())
+	}
+	if !strings.Contains(healthRes.Body.String(), `/repo/REVIEW-WORKFLOW.md`) {
+		t.Fatalf("GET /healthz body = %q, want review workflow path", healthRes.Body.String())
 	}
 	if !strings.Contains(healthRes.Body.String(), `/repo/.env`) {
 		t.Fatalf("GET /healthz body = %q, want env path", healthRes.Body.String())
@@ -109,7 +119,7 @@ func TestHandlerDashboardRendersSnapshot(t *testing.T) {
 		func() domain.StateSnapshot {
 			return domain.StateSnapshot{
 				GeneratedAt: time.Date(2026, 3, 18, 9, 0, 0, 0, time.UTC),
-				Workflow:    domain.WorkflowStatus{Path: "/repo/WORKFLOW.md"},
+				Workflow:    domain.WorkflowStatus{Path: "/repo/WORKFLOW.md", ReviewPath: "/repo/REVIEW-WORKFLOW.md"},
 				Environment: domain.EnvironmentStatus{
 					DotEnvPath:    "/repo/.env",
 					DotEnvPresent: true,
@@ -118,8 +128,15 @@ func TestHandlerDashboardRendersSnapshot(t *testing.T) {
 						{Name: "GO_HARNESS_LIVE_LINEAR_PROJECT_SLUG", Value: "test", Source: "process"},
 					},
 				},
-				Counts:   domain.SnapshotCounts{Running: 1, Retrying: 1},
-				Dispatch: domain.DispatchStatus{Blocked: true, Error: "invalid workflow"},
+				Counts: domain.SnapshotCounts{Running: 1, Retrying: 1},
+				Dispatch: domain.DispatchStatus{
+					Blocked: true,
+					Error:   "review: invalid workflow",
+					Workers: []domain.WorkerDispatchStatus{
+						{Worker: "coding", Blocked: false},
+						{Worker: "review", Blocked: true, Error: "invalid workflow"},
+					},
+				},
 				Running: []domain.RunningSnapshot{
 					{
 						Issue:     domain.Issue{Identifier: "ABC-1", Title: "Example", State: "In Progress"},
@@ -127,6 +144,7 @@ func TestHandlerDashboardRendersSnapshot(t *testing.T) {
 						Workspace: domain.Workspace{Path: "/tmp/ABC-1"},
 						LiveSession: &domain.LiveSession{
 							SessionID: "thread-1-turn-2",
+							Worker:    "coding",
 						},
 					},
 				},
@@ -154,7 +172,7 @@ func TestHandlerDashboardRendersSnapshot(t *testing.T) {
 		t.Fatalf("Content-Type = %q, want text/html", contentType)
 	}
 	body := res.Body.String()
-	for _, expected := range []string{"Go Harness", "Dispatch blocked", "/repo/WORKFLOW.md", "/repo/.env", "LINEAR_API_KEY", "&lt;redacted&gt;", "GO_HARNESS_LIVE_LINEAR_PROJECT_SLUG", "ABC-1", "ABC-2", "ABC-3", "Recent Activity", "issue_claimed", "tracker_state_transition", "Todo -> In Progress"} {
+	for _, expected := range []string{"Go Harness", "Dispatch blocked", "/repo/WORKFLOW.md", "/repo/REVIEW-WORKFLOW.md", "/repo/.env", "LINEAR_API_KEY", "&lt;redacted&gt;", "GO_HARNESS_LIVE_LINEAR_PROJECT_SLUG", "coding", "review", "ABC-1", "ABC-2", "ABC-3", "Recent Activity", "issue_claimed", "tracker_state_transition", "Todo -> In Progress"} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("dashboard body missing %q: %q", expected, body)
 		}

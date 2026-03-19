@@ -22,6 +22,11 @@ func (d *dynamicTracker) PollCandidates(ctx context.Context) ([]domain.Issue, er
 	return linear.NewClient(d.httpClient, cfg.Tracker).PollCandidates(ctx)
 }
 
+func (d *dynamicTracker) PollTerminalIssues(ctx context.Context) ([]domain.Issue, error) {
+	cfg := d.store.Current()
+	return linear.NewClient(d.httpClient, cfg.Tracker).PollTerminalIssues(ctx)
+}
+
 func (d *dynamicTracker) FetchByIDs(ctx context.Context, ids []string) ([]domain.Issue, error) {
 	cfg := d.store.Current()
 	return linear.NewClient(d.httpClient, cfg.Tracker).FetchByIDs(ctx, ids)

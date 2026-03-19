@@ -156,12 +156,20 @@ type SnapshotCounts struct {
 }
 
 type DispatchStatus struct {
-	Blocked bool   `json:"blocked"`
-	Error   string `json:"error,omitempty"`
+	Blocked bool                   `json:"blocked"`
+	Error   string                 `json:"error,omitempty"`
+	Workers []WorkerDispatchStatus `json:"workers,omitempty"`
 }
 
 type WorkflowStatus struct {
-	Path string `json:"path,omitempty"`
+	Path       string `json:"path,omitempty"`
+	ReviewPath string `json:"review_path,omitempty"`
+}
+
+type WorkerDispatchStatus struct {
+	Worker  string `json:"worker"`
+	Blocked bool   `json:"blocked"`
+	Error   string `json:"error,omitempty"`
 }
 
 type EnvironmentStatus struct {

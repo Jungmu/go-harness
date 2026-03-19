@@ -373,12 +373,14 @@ claim이 해제되었고 다시 poll 결과에 따라 재판단된다.
 
 1. logger와 observability sink를 초기화한다.
 2. `WORKFLOW.md`를 찾고 로드한다.
-3. startup validation을 수행한다.
-4. invalid config면 서비스 시작을 거부한다.
-5. last-known-good config를 메모리에 적재한다.
-6. terminal issue cleanup을 1회 수행한다.
-7. `WORKFLOW.md` watch를 시작한다.
-8. scheduler poll loop와 optional HTTP server를 시작한다.
+3. 같은 디렉터리에 `REVIEW-WORKFLOW.md`가 있으면 함께 로드한다.
+4. startup validation을 수행한다.
+5. invalid config면 서비스 시작을 거부한다.
+6. last-known-good config를 메모리에 적재한다.
+7. coding lane만 terminal issue cleanup을 1회 수행한다.
+8. workflow file watch를 시작한다.
+9. coding orchestrator와 optional review orchestrator를 시작한다.
+10. aggregate snapshot을 노출하는 optional HTTP server를 시작한다.
 
 ### 11.3 정상 dispatch 흐름
 
@@ -386,7 +388,7 @@ claim이 해제되었고 다시 poll 결과에 따라 재판단된다.
 2. per-tick dispatch validation을 수행한다.
 3. validation이 실패하면 신규 dispatch는 건너뛰고 reconciliation만 수행한다.
 4. Linear에서 candidate issues를 조회한다.
-5. 현재 `claimed`, `running`, `retry` 상태를 고려해 dispatch 대상을 고른다.
+5. candidate issue는 `priority` 오름차순, `created_at` 오름차순, `identifier` 오름차순으로 정렬한 뒤 현재 `claimed`, `running`, `retry` 상태를 고려해 dispatch 대상을 고른다.
 6. issue별 workspace를 준비하고 hook을 실행한다.
 7. dispatch 시작 시 issue를 `In Progress`로 전환한다.
 8. Codex app-server session을 시작한다.
@@ -397,6 +399,18 @@ claim이 해제되었고 다시 poll 결과에 따라 재판단된다.
 13. issue가 terminal이면 session을 중단하고 workspace를 정리한다.
 14. issue가 non-active non-terminal이면 session만 중단하고 cleanup은 정책에 따라 분리한다.
 
+### 11.3.a review dispatch 흐름
+
+1. review lane은 `REVIEW-WORKFLOW.md`가 있을 때만 활성화된다.
+2. review lane은 `tracker.active_states = ["In Review"]` candidate만 조회한다.
+3. review lane은 workspace를 준비한 뒤 stale `.harness/review-result.json`을 지운다.
+4. review lane은 `REVIEW-WORKFLOW.md` body를 렌더링하고 internal review contract suffix를 덧붙인다.
+5. review lane은 continuation 없이 정확히 한 turn만 실행한다.
+6. review turn이 성공하면 `.harness/review-result.json`과 `.harness/review-notes.md`를 검증한다.
+7. verdict가 `done`이면 issue를 `Done`으로 전환하고 workspace를 정리한다.
+8. verdict가 `todo`이면 issue를 `Todo`로 전환하고 claim만 해제한다. workspace는 유지한다.
+9. review artifact가 없거나 invalid면 attempt failure로 처리하고 normal retry policy를 적용한다.
+
 ### 11.4 continuation 규칙
 
 - 하나의 run 안에서는 동일 `thread_id`를 재사용한다.
@@ -406,6 +420,8 @@ claim이 해제되었고 다시 poll 결과에 따라 재판단된다.
 - `turn/completed` 자체는 곧 issue 완료를 뜻하지 않지만, run이 정상 종료되고 issue가 여전히 active면 harness가 `Done` 전환을 시도한다.
 - issue가 여전히 active이고 `agent.max_turns` 미만이면 같은 session에서 다음 turn을 시작한다.
 - issue가 active인데 `agent.max_turns`에 도달하면 현재 run을 종료하고 issue를 `In Review`로 전환한다.
+- review lane은 continuation을 사용하지 않는다.
+- coding lane workspace에 `.harness/review-notes.md`가 있으면 prompt suffix로 먼저 읽도록 지시한다.
 
 ### 11.5 reconciliation과 cancellation 규칙
 
@@ -414,6 +430,7 @@ claim이 해제되었고 다시 poll 결과에 따라 재판단된다.
 - poll 시점과 turn 종료 시점 모두에서 issue의 active 또는 terminal 여부를 다시 확인한다.
 - running issue가 terminal로 바뀌면 session을 취소하고 cleanup을 수행한다.
 - running issue가 active가 아닌 다른 상태로 바뀌면 session을 취소하고 claim을 해제한다.
+- running 또는 retry issue가 tracker refresh에서 사라지면 claim을 해제하고 operator-visible timeline event를 남긴다.
 - retry queue는 실패 후 재실행과 정상 turn 후 continuation 둘 다 표현할 수 있어야 한다.
 
 ## 12. `WORKFLOW.md`와 설정 계약
@@ -430,6 +447,7 @@ loader 동작은 다음과 같다.
 
 - 파일을 읽지 못하면 `missing_workflow_file` 오류를 반환한다.
 - workflow file은 저장소 소유 설정이며 version-controlled resource로 간주한다.
+- 같은 디렉터리에 `REVIEW-WORKFLOW.md`가 있으면 review lane이 그 파일을 별도 설정/프롬프트 계약으로 사용한다.
 
 ### 12.2 파일 형식과 파싱 규칙
 
@@ -920,8 +938,7 @@ Go v1에서 권장하는 status surface는 다음과 같다.
 - `attempts`
 - `running`
 - `retry`
-- `recent_events`
-- `last_error`
+- `history`
 
 현재 in-memory state에 없는 issue면 `404`를 반환한다.
 

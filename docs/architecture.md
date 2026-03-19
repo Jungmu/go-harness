@@ -6,6 +6,7 @@ The current Go harness implements:
 
 - `cmd/harnessd` daemon entrypoint
 - workflow/config loading from `WORKFLOW.md`
+- optional sibling `REVIEW-WORKFLOW.md` loading for an in-process review lane
 - Linear polling, issue refresh, and automatic `In Progress` / `Done` state transitions
 - per-issue workspace creation and lifecycle hooks
 - local Codex app-server execution with same-session continuation turns
@@ -22,9 +23,11 @@ The current Go harness implements:
   - applies defaults
   - resolves env/path values
   - validates runtime config
+  - validates optional review-lane config against the active main workflow
   - preserves last-known-good config across reload errors
 - `internal/tracker/linear`
   - polls candidate issues
+  - polls terminal issues for startup cleanup
   - refreshes issues by ID
   - resolves workflow states and transitions issues to `In Progress` and `Done`
   - normalizes Linear issue payloads
@@ -39,22 +42,26 @@ The current Go harness implements:
   - streams events and usage totals
 - `internal/orchestrator`
   - owns `claimed`, `running`, `retry`, `completed`
+  - runs one-time startup cleanup for terminal workspaces
+  - sorts candidate dispatches by priority, creation time, then identifier
   - transitions issues to `In Progress` before prompt execution
   - transitions successful runs to `Done` unless the run explicitly stops for retry or external state change
+  - runs an optional review lane that keeps issues in `In Review` until a structured verdict moves them to `Done` or `Todo`
   - reconciles terminal/non-active issues
+  - releases claims when tracker refresh no longer returns a running or retrying issue
   - refreshes the issue between turns to decide continuation vs stop
   - transitions issues to `In Review` when one live run exhausts `agent.max_turns`
   - preserves `retry.last_error` when an attempt exits with a worker error
   - blocks dispatch when workflow reload is invalid
   - records issue-level timeline events and appends them to `workspace.root/.harness-history/*.jsonl`
-  - projects status snapshots
+  - projects shared status snapshots and per-issue history buffers
 - `internal/server`
   - serves `/`
   - serves `/healthz`
   - serves `/api/v1/state`
   - serves `/api/v1/issues/{identifier}`
   - serves `POST /api/v1/refresh`
-  - renders a human-readable dashboard from the same runtime snapshot used by the JSON API, including the active workflow path, redacted environment metadata, and recent issue activity timeline
+  - renders a human-readable dashboard from the same runtime snapshot used by the JSON API, including both workflow paths, lane-specific dispatch health, redacted environment metadata, worker labels, and recent issue activity timeline
 
 ## Current Status Surfaces
 
@@ -69,7 +76,6 @@ The current Go harness implements:
 
 ## Remaining Milestone 2+ Work
 
-- stronger issue detail history outside the running state
 - broader live Linear + real Codex coverage for tracker write flows
 - tracker write tools
 - auth and multi-tenant hardening beyond trusted local operation

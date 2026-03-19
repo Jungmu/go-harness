@@ -2,7 +2,7 @@
 
 ## Scope
 
-This document describes the currently implemented `WORKFLOW.md` contract in the Go harness.
+This document describes the currently implemented `WORKFLOW.md` contract in the Go harness, plus the optional sibling `REVIEW-WORKFLOW.md` review-lane contract.
 
 ## File Resolution
 
@@ -13,6 +13,8 @@ The runtime resolves the workflow file in this order:
 3. `WORKFLOW.md` in the executable directory
 
 If the file cannot be read, the loader returns `missing_workflow_file`.
+
+If a sibling `REVIEW-WORKFLOW.md` exists next to the active `WORKFLOW.md`, the daemon starts a second in-process review lane from that file.
 
 ## Parsing Rules
 
@@ -84,8 +86,34 @@ The current renderer supports:
 
 Unknown variables and filters return `workflow_template_render_error`.
 
+## Review Workflow Contract
+
+- `REVIEW-WORKFLOW.md` is optional and is discovered only as a sibling of the active `WORKFLOW.md`.
+- The review workflow must use `tracker.kind = linear`.
+- The review workflow must use the same `tracker.project_slug`, `workspace.root`, and `tracker.terminal_states` set as the main workflow.
+- The review workflow must use `tracker.active_states = ["In Review"]`.
+- An invalid `REVIEW-WORKFLOW.md` blocks daemon startup if the file exists.
+- Review reloads are independent from the main workflow. An invalid review reload blocks only review dispatch.
+- Review prompts are rendered from the `REVIEW-WORKFLOW.md` body template and then extended with an internal review contract suffix.
+- Review turns do not use continuation. Each review attempt runs exactly one turn.
+
+## Review Result Contract
+
+- A successful review turn must write `.harness/review-result.json` and `.harness/review-notes.md` inside the issue workspace.
+- Before a review turn starts, the runtime removes any stale `.harness/review-result.json`.
+- On successful verdict parsing, the runtime deletes `.harness/review-result.json` and keeps `.harness/review-notes.md`.
+- `review-result.json` must decode to:
+  - `decision`: `"done"` or `"todo"`
+  - `summary`: non-empty string
+  - `blocking_issues`: array
+- `decision="done"` requires `blocking_issues = []`.
+- `decision="todo"` requires at least one blocking issue.
+- Each blocking issue must include `title`, `reason`, and `file`. `line` is optional.
+- Missing or invalid review artifacts fail the attempt and follow the normal retry path.
+
 ## Continuation Turns
 
+- On startup, the runtime fetches terminal issues for the configured project and removes matching workspace directories under `workspace.root`.
 - Before the first turn starts, the runtime moves a claimed issue to `In Progress` if it is not already there.
 - The first turn prompt is rendered from the `WORKFLOW.md` body template.
 - If the issue is still active after `turn/completed`, the runner reuses the same live Codex thread and workspace.
@@ -93,6 +121,8 @@ Unknown variables and filters return `workflow_template_render_error`.
 - The continuation prompt includes the issue identifier, refreshed tracker state, and the next turn count.
 - If the refreshed issue is still active and the current turn count has reached `agent.max_turns`, the run stops and the orchestrator transitions the issue to `In Review`.
 - If a run exits successfully without an explicit retry stop reason and the issue is still in an active state, the runtime transitions the issue to `Done`.
+- If `.harness/review-notes.md` exists in a coding workspace, the runtime appends an internal prompt suffix telling the coding lane to read it first.
+- Review turns do not transition the issue to `In Progress`; they keep the issue in `In Review` until the verdict transitions it to `Done` or `Todo`.
 
 ## Reload Semantics
 
@@ -111,5 +141,6 @@ This is currently implemented as poll-time file change detection, not an `fsnoti
 
 - The runtime records issue-level timeline events for dispatch, workspace preparation, tracker state transitions, runner milestones, retries, and cleanup.
 - `GET /api/v1/state` exposes the most recent events as `recent_activity`.
-- `GET /api/v1/issues/{identifier}` includes issue history when recent events are available.
+- `GET /api/v1/issues/{identifier}` returns the per-issue in-memory history buffer for the identifier when present.
+- Running snapshots include `live_session.worker` so operators can distinguish `coding` from `review`.
 - The runtime also appends JSONL audit records under `workspace.root/.harness-history/`.

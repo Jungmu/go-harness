@@ -4,8 +4,7 @@ tracker:
   api_key: $LINEAR_API_KEY
   project_slug: my-linear-project
   active_states:
-    - Todo
-    - In Progress
+    - In Review
   terminal_states:
     - Done
     - Closed
@@ -26,11 +25,9 @@ hooks:
   timeout_ms: 60000
 
 agent:
-  max_concurrent_agents: 4
-  max_turns: 20
+  max_concurrent_agents: 2
+  max_turns: 1
   max_retry_backoff_ms: 300000
-  max_concurrent_agents_by_state:
-    In Progress: 2
 
 codex:
   command: codex app-server
@@ -44,12 +41,9 @@ codex:
 
 logging:
   level: info
-
-server:
-  port: 8080
 ---
 
-You are operating inside an isolated issue workspace for {{ issue.identifier }}.
+You are reviewing the current workspace state for {{ issue.identifier }}.
 
 Issue title: {{ issue.title }}
 Issue state: {{ issue.state }}
@@ -61,17 +55,12 @@ Issue description:
 {{ issue.description }}
 {% endif %}
 
-{% if issue.branch_name %}
-Suggested branch name: {{ issue.branch_name }}
-{% endif %}
-
 Labels: {{ issue.labels }}
 Blocked by: {{ issue.blocked_by }}
 
 Requirements:
 
-- Work only inside the provided workspace.
-- If `.harness/review-notes.md` exists, read it first and resolve every blocking issue it lists.
-- Use the issue context to make the smallest correct change.
-- Run focused verification for the files you touched.
-- Leave the workspace in a reviewable state for a human operator.
+- Review the existing workspace changes as they are.
+- Do not make new code changes.
+- Write a reviewer-facing summary to `.harness/review-notes.md`.
+- Write the machine-readable verdict to `.harness/review-result.json`.

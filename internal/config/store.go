@@ -29,6 +29,8 @@ const (
 	defaultApprovalPolicy  = "never"
 	defaultThreadSandbox   = "workspace-write"
 	defaultLogLevel        = "info"
+	ReviewWorkflowFilename = "REVIEW-WORKFLOW.md"
+	reviewActiveStateName  = "In Review"
 )
 
 var (
@@ -38,6 +40,7 @@ var (
 
 type Store struct {
 	loader      *workflow.Loader
+	validator   func(RuntimeConfig) error
 	mu          sync.RWMutex
 	path        string
 	envPath     string
@@ -150,6 +153,12 @@ func NewStore(loader *workflow.Loader) *Store {
 	return &Store{loader: loader}
 }
 
+func (s *Store) SetValidator(validator func(RuntimeConfig) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.validator = validator
+}
+
 func (s *Store) LoadAndValidate(path string) (RuntimeConfig, error) {
 	resolvedPath, err := resolveWorkflowPath(path)
 	if err != nil {
@@ -159,6 +168,12 @@ func (s *Store) LoadAndValidate(path string) (RuntimeConfig, error) {
 
 	cfg, workflowMod, dotEnvState, err := s.loadConfig(resolvedPath, envPath)
 	if err != nil {
+		return RuntimeConfig{}, err
+	}
+	if err := s.validateRuntime(cfg); err != nil {
+		s.mu.Lock()
+		s.err = err
+		s.mu.Unlock()
 		return RuntimeConfig{}, err
 	}
 
@@ -192,6 +207,7 @@ func (s *Store) ReloadIfChanged() (RuntimeConfig, bool, error) {
 	lastWorkflowMod := s.workflowMod
 	lastDotEnvState := s.dotEnvState
 	current := s.cfg
+	validator := s.validator
 	s.mu.RUnlock()
 
 	info, err := os.Stat(path)
@@ -209,6 +225,17 @@ func (s *Store) ReloadIfChanged() (RuntimeConfig, bool, error) {
 		return current, false, err
 	}
 	if info.ModTime().Equal(lastWorkflowMod) && dotEnvState == lastDotEnvState {
+		if validator != nil {
+			if err := validator(current); err != nil {
+				s.mu.Lock()
+				s.err = err
+				s.mu.Unlock()
+				return current, false, err
+			}
+			s.mu.Lock()
+			s.err = nil
+			s.mu.Unlock()
+		}
 		return current, false, nil
 	}
 
@@ -218,6 +245,14 @@ func (s *Store) ReloadIfChanged() (RuntimeConfig, bool, error) {
 		s.err = err
 		s.mu.Unlock()
 		return current, false, err
+	}
+	if validator != nil {
+		if err := validator(cfg); err != nil {
+			s.mu.Lock()
+			s.err = err
+			s.mu.Unlock()
+			return current, false, err
+		}
 	}
 
 	s.mu.Lock()
@@ -234,6 +269,16 @@ func (s *Store) DispatchValidationError() error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.err
+}
+
+func (s *Store) validateRuntime(cfg RuntimeConfig) error {
+	s.mu.RLock()
+	validator := s.validator
+	s.mu.RUnlock()
+	if validator == nil {
+		return nil
+	}
+	return validator(cfg)
 }
 
 func (c RuntimeConfig) IsActiveState(state string) bool {
@@ -427,6 +472,52 @@ func resolveWorkflowPath(path string) (string, error) {
 	}
 
 	return filepath.Abs(path)
+}
+
+func ResolveSiblingWorkflowPath(baseWorkflowPath, filename string) (string, bool, error) {
+	baseWorkflowPath = strings.TrimSpace(baseWorkflowPath)
+	filename = strings.TrimSpace(filename)
+	if baseWorkflowPath == "" {
+		return "", false, fmt.Errorf("base workflow path is required")
+	}
+	if filename == "" {
+		return "", false, fmt.Errorf("sibling workflow filename is required")
+	}
+	path := filepath.Join(filepath.Dir(baseWorkflowPath), filename)
+	info, err := os.Stat(path)
+	if err == nil {
+		if info.IsDir() {
+			return "", false, nil
+		}
+		resolved, err := filepath.Abs(path)
+		if err != nil {
+			return "", false, err
+		}
+		return resolved, true, nil
+	}
+	if os.IsNotExist(err) {
+		return "", false, nil
+	}
+	return "", false, err
+}
+
+func ValidateReviewWorkflow(mainCfg, reviewCfg RuntimeConfig) error {
+	if !strings.EqualFold(strings.TrimSpace(reviewCfg.Tracker.Kind), "linear") {
+		return fmt.Errorf("review workflow must use tracker.kind=linear")
+	}
+	if strings.TrimSpace(reviewCfg.Tracker.ProjectSlug) != strings.TrimSpace(mainCfg.Tracker.ProjectSlug) {
+		return fmt.Errorf("review workflow tracker.project_slug must match main workflow")
+	}
+	if filepath.Clean(reviewCfg.Workspace.Root) != filepath.Clean(mainCfg.Workspace.Root) {
+		return fmt.Errorf("review workflow workspace.root must match main workflow")
+	}
+	if len(reviewCfg.Tracker.ActiveStates) != 1 || !strings.EqualFold(strings.TrimSpace(reviewCfg.Tracker.ActiveStates[0]), reviewActiveStateName) {
+		return fmt.Errorf("review workflow tracker.active_states must be [\"%s\"]", reviewActiveStateName)
+	}
+	if !sameNormalizedStates(mainCfg.Tracker.TerminalStates, reviewCfg.Tracker.TerminalStates) {
+		return fmt.Errorf("review workflow tracker.terminal_states must match main workflow")
+	}
+	return nil
 }
 
 func executableWorkflowPath() string {
@@ -736,6 +827,25 @@ func normalizeStates(states []string) []string {
 		seen[trimmed] = struct{}{}
 	}
 	return result
+}
+
+func sameNormalizedStates(left, right []string) bool {
+	leftNormalized := normalizeStates(left)
+	rightNormalized := normalizeStates(right)
+	if len(leftNormalized) != len(rightNormalized) {
+		return false
+	}
+	leftSet := makeStateSet(leftNormalized)
+	rightSet := makeStateSet(rightNormalized)
+	if len(leftSet) != len(rightSet) {
+		return false
+	}
+	for key := range leftSet {
+		if _, ok := rightSet[key]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func makeStateSet(states []string) map[string]struct{} {

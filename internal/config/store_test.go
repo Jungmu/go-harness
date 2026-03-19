@@ -459,6 +459,111 @@ Cwd prompt
 	}
 }
 
+func TestResolveSiblingWorkflowPathFindsReviewWorkflow(t *testing.T) {
+	root := t.TempDir()
+	mainPath := filepath.Join(root, "WORKFLOW.md")
+	reviewPath := filepath.Join(root, ReviewWorkflowFilename)
+	if err := os.WriteFile(mainPath, []byte("main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(reviewPath, []byte("review"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, found, err := ResolveSiblingWorkflowPath(mainPath, ReviewWorkflowFilename)
+	if err != nil {
+		t.Fatalf("ResolveSiblingWorkflowPath() error = %v", err)
+	}
+	if !found {
+		t.Fatal("ResolveSiblingWorkflowPath() found = false, want true")
+	}
+	assertSameFile(t, resolved, reviewPath)
+}
+
+func TestValidateReviewWorkflowRejectsMismatchedSettings(t *testing.T) {
+	mainCfg := RuntimeConfig{
+		Tracker: TrackerConfig{
+			Kind:           "linear",
+			ProjectSlug:    "MAIN",
+			ActiveStates:   []string{"Todo", "In Progress"},
+			TerminalStates: []string{"Done", "Closed"},
+		},
+		Workspace: WorkspaceConfig{Root: "/tmp/main"},
+	}
+	reviewCfg := RuntimeConfig{
+		Tracker: TrackerConfig{
+			Kind:           "linear",
+			ProjectSlug:    "OTHER",
+			ActiveStates:   []string{"In Review", "Todo"},
+			TerminalStates: []string{"Done"},
+		},
+		Workspace: WorkspaceConfig{Root: "/tmp/review"},
+	}
+
+	if err := ValidateReviewWorkflow(mainCfg, reviewCfg); err == nil {
+		t.Fatal("ValidateReviewWorkflow() error = nil, want mismatch error")
+	}
+
+	reviewCfg.Tracker.ProjectSlug = "MAIN"
+	reviewCfg.Workspace.Root = "/tmp/main"
+	reviewCfg.Tracker.ActiveStates = []string{"In Review"}
+	reviewCfg.Tracker.TerminalStates = []string{"Closed", "Done"}
+	if err := ValidateReviewWorkflow(mainCfg, reviewCfg); err != nil {
+		t.Fatalf("ValidateReviewWorkflow() error = %v", err)
+	}
+}
+
+func TestStoreReloadIfChangedRunsValidatorWithoutFileChange(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("LINEAR_API_KEY", "linear-token")
+
+	path := filepath.Join(root, "WORKFLOW.md")
+	content := `---
+tracker:
+  kind: linear
+  api_key: $LINEAR_API_KEY
+  project_slug: TEST
+---
+Prompt
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var allow bool
+	store := NewStore(workflow.NewLoader())
+	store.SetValidator(func(RuntimeConfig) error {
+		if allow {
+			return nil
+		}
+		return errors.New("validator_blocked")
+	})
+
+	if _, err := store.LoadAndValidate(path); err == nil {
+		t.Fatal("LoadAndValidate() error = nil, want validator error")
+	}
+
+	allow = true
+	if _, err := store.LoadAndValidate(path); err != nil {
+		t.Fatalf("LoadAndValidate() error = %v", err)
+	}
+
+	allow = false
+	cfg, changed, err := store.ReloadIfChanged()
+	if err == nil {
+		t.Fatal("ReloadIfChanged() error = nil, want validator error")
+	}
+	if changed {
+		t.Fatal("ReloadIfChanged() changed = true, want false")
+	}
+	if cfg.Tracker.ProjectSlug != "TEST" {
+		t.Fatalf("ProjectSlug = %q, want TEST", cfg.Tracker.ProjectSlug)
+	}
+	if store.DispatchValidationError() == nil {
+		t.Fatal("DispatchValidationError() = nil, want validator error")
+	}
+}
+
 func TestStoreReloadIfChangedKeepsLastKnownGoodOnInvalidConfig(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("LINEAR_API_KEY", "linear-token")

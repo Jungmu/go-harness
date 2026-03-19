@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -29,10 +30,13 @@ const (
 	startStateName      = "In Progress"
 	doneStateName       = "Done"
 	reviewStateName     = "In Review"
+	codingWorkerName    = "coding"
+	reviewWorkerName    = "review"
 )
 
 type Tracker interface {
 	PollCandidates(ctx context.Context) ([]domain.Issue, error)
+	PollTerminalIssues(ctx context.Context) ([]domain.Issue, error)
 	FetchByIDs(ctx context.Context, ids []string) ([]domain.Issue, error)
 	TransitionState(ctx context.Context, issue domain.Issue, stateName string) (domain.Issue, error)
 }
@@ -63,6 +67,8 @@ type Orchestrator struct {
 	logger     *slog.Logger
 	configs    ConfigSource
 	lastBlock  string
+	workerName string
+	reviewMode bool
 
 	controlCh chan struct{}
 	eventCh   chan any
@@ -71,6 +77,7 @@ type Orchestrator struct {
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup
 	snapshot atomic.Value
+	history  atomic.Value
 }
 
 type runningTask struct {
@@ -137,6 +144,23 @@ func WithConfigSource(source ConfigSource) Option {
 	}
 }
 
+func WithWorkerName(worker string) Option {
+	return func(orch *Orchestrator) {
+		if strings.TrimSpace(worker) != "" {
+			orch.workerName = strings.TrimSpace(worker)
+		}
+	}
+}
+
+func WithReviewMode() Option {
+	return func(orch *Orchestrator) {
+		orch.reviewMode = true
+		if strings.TrimSpace(orch.workerName) == "" {
+			orch.workerName = reviewWorkerName
+		}
+	}
+}
+
 func New(cfg config.RuntimeConfig, tracker Tracker, workspaces WorkspaceManager, runner Runner, logger *slog.Logger, opts ...Option) *Orchestrator {
 	orch := &Orchestrator{
 		cfg:        cfg,
@@ -147,6 +171,7 @@ func New(cfg config.RuntimeConfig, tracker Tracker, workspaces WorkspaceManager,
 		controlCh:  make(chan struct{}, 1),
 		eventCh:    make(chan any, 128),
 		doneCh:     make(chan struct{}),
+		workerName: codingWorkerName,
 	}
 	for _, opt := range opts {
 		opt(orch)
@@ -156,6 +181,7 @@ func New(cfg config.RuntimeConfig, tracker Tracker, workspaces WorkspaceManager,
 		Workflow:    domain.WorkflowStatus{Path: cfg.SourcePath},
 		Environment: environmentStatus(cfg),
 	})
+	orch.history.Store(map[string][]domain.TimelineEvent{})
 	return orch
 }
 
@@ -205,7 +231,7 @@ func (o *Orchestrator) Snapshot() domain.StateSnapshot {
 
 func (o *Orchestrator) IssueSnapshot(identifier string) (domain.IssueRuntimeSnapshot, bool) {
 	snapshot := o.Snapshot()
-	history := issueHistory(snapshot.RecentActivity, identifier)
+	history := o.issueHistory(identifier)
 	for _, running := range snapshot.Running {
 		if running.Issue.Identifier == identifier {
 			return domain.IssueRuntimeSnapshot{
@@ -265,6 +291,9 @@ func (o *Orchestrator) loop(ctx context.Context) {
 	defer ticker.Stop()
 
 	o.maybeReloadConfig(ticker)
+	if !o.reviewMode {
+		o.startupCleanup(ctx)
+	}
 	o.handleTick(ctx, st)
 	o.publishSnapshot(st)
 
@@ -330,6 +359,7 @@ func (o *Orchestrator) handleTick(ctx context.Context, st *state) {
 		o.logger.Error("candidate poll failed", slog.Any("error", err))
 		return
 	}
+	sortDispatchCandidates(candidates)
 	o.logger.Debug("candidate poll completed", slog.Int("candidates", len(candidates)))
 	if len(candidates) == 0 {
 		o.logger.Info("candidate poll returned no issues",
@@ -366,9 +396,37 @@ func (o *Orchestrator) reconcileRunning(ctx context.Context, st *state) {
 		return
 	}
 
+	issueByID := make(map[string]domain.Issue, len(issues))
 	for _, issue := range issues {
-		entry := st.running[issue.ID]
+		issueByID[issue.ID] = issue
+	}
+
+	for _, issueID := range ids {
+		entry := st.running[issueID]
 		if entry == nil {
+			continue
+		}
+		issue, ok := issueByID[issueID]
+		if !ok {
+			if entry.stopReason != "missing_issue" {
+				entry.stopReason = "missing_issue"
+				o.recordTimeline(st, entry.issue, entry.workspace, domain.TimelineEvent{
+					At:           time.Now().UTC(),
+					IssueID:      entry.issue.ID,
+					Identifier:   entry.issue.Identifier,
+					Attempt:      entry.attempt,
+					Event:        "issue_cancelled",
+					Status:       "cancelled",
+					Reason:       "missing_issue",
+					WorkspaceKey: entry.workspace.WorkspaceKey,
+					Workspace:    entry.workspace.Path,
+					Message:      "issue left the running set because it was missing from tracker refresh",
+				})
+				o.logger.Info("running issue missing from tracker refresh",
+					slog.String("issue", entry.issue.Identifier),
+				)
+			}
+			entry.cancel()
 			continue
 		}
 
@@ -457,6 +515,24 @@ func (o *Orchestrator) dispatchDueRetries(ctx context.Context, st *state) {
 		retry := st.retryQueue[issueID]
 		issue, ok := issueByID[issueID]
 		if !ok {
+			delete(st.retryQueue, issueID)
+			delete(st.claimed, issueID)
+			o.recordTimeline(st, domain.Issue{ID: issueID, Identifier: retry.Identifier}, domain.Workspace{
+				Path:         filepath.Join(o.cfg.Workspace.Root, domain.SanitizeWorkspaceKey(retry.Identifier)),
+				WorkspaceKey: domain.SanitizeWorkspaceKey(retry.Identifier),
+			}, domain.TimelineEvent{
+				At:           now,
+				IssueID:      issueID,
+				Identifier:   retry.Identifier,
+				Attempt:      retry.Attempt,
+				Event:        "issue_released",
+				Status:       "released",
+				Reason:       "missing_issue",
+				WorkspaceKey: domain.SanitizeWorkspaceKey(retry.Identifier),
+				Workspace:    filepath.Join(o.cfg.Workspace.Root, domain.SanitizeWorkspaceKey(retry.Identifier)),
+				LastError:    retry.LastError,
+				Message:      "retry entry released because the issue was missing from tracker refresh",
+			})
 			continue
 		}
 
@@ -639,7 +715,34 @@ func (o *Orchestrator) executeAttempt(ctx context.Context, issue domain.Issue, a
 		},
 	})
 
-	runIssue, err := o.transitionIssueState(ctx, issue, startStateName, "issue moved to in-progress")
+	if o.reviewMode {
+		if err := prepareReviewArtifacts(workspace); err != nil {
+			o.pushEvent(timelineUpdate{
+				IssueID:    issue.ID,
+				Identifier: issue.Identifier,
+				Workspace:  workspace,
+				Event: domain.TimelineEvent{
+					At:           time.Now().UTC(),
+					IssueID:      issue.ID,
+					Identifier:   issue.Identifier,
+					Attempt:      attempt,
+					Event:        "review_artifacts_prepare_failed",
+					Status:       "error",
+					Reason:       "review_artifacts_prepare_failed",
+					StateAfter:   issue.State,
+					WorkspaceKey: workspace.WorkspaceKey,
+					Workspace:    workspace.Path,
+					LastError:    err.Error(),
+					Message:      "review artifacts could not be prepared before the run started",
+				},
+			})
+			_ = o.workspaces.AfterRun(context.Background(), workspace)
+			o.pushEvent(workerExit{Issue: issue, Attempt: attempt, Workspace: workspace, Err: err})
+			return
+		}
+	}
+
+	runIssue, err := o.startIssueForAttempt(ctx, issue)
 	if err != nil {
 		_ = o.workspaces.AfterRun(context.Background(), workspace)
 		o.pushEvent(workerExit{Issue: issue, Attempt: attempt, Workspace: workspace, Err: err})
@@ -671,36 +774,42 @@ func (o *Orchestrator) executeAttempt(ctx context.Context, issue domain.Issue, a
 		o.pushEvent(workerExit{Issue: runIssue, Attempt: attempt, Workspace: workspace, Err: err})
 		return
 	}
+	prompt = o.augmentPrompt(prompt, workspace)
+
+	var continueFn codex.ContinueFunc
+	if !o.reviewMode {
+		continueFn = func(runCtx context.Context, session domain.LiveSession) (codex.ContinueDecision, error) {
+			refreshed, err := o.refreshIssue(runCtx, runIssue.ID)
+			if err != nil {
+				return codex.ContinueDecision{}, err
+			}
+			if refreshed == nil {
+				return codex.ContinueDecision{Continue: false}, nil
+			}
+			if o.cfg.IsTerminalState(refreshed.State) || !o.cfg.IsActiveState(refreshed.State) {
+				return codex.ContinueDecision{
+					Continue:       false,
+					RefreshedIssue: refreshed,
+				}, nil
+			}
+			if session.TurnCount >= o.cfg.Agent.MaxTurns {
+				return codex.ContinueDecision{
+					Continue:       false,
+					StopReason:     "max_turns_reached",
+					RefreshedIssue: refreshed,
+				}, nil
+			}
+			return codex.ContinueDecision{
+				Continue:       true,
+				NextPrompt:     workflow.RenderContinuationPrompt(*refreshed, session.TurnCount+1),
+				RefreshedIssue: refreshed,
+			}, nil
+		}
+	}
 
 	result, err := o.runner.RunAttempt(ctx, runIssue, workspace, prompt, attempt, func(event codex.Event) {
 		o.pushEvent(workerEvent{IssueID: runIssue.ID, Event: event})
-	}, func(runCtx context.Context, session domain.LiveSession) (codex.ContinueDecision, error) {
-		refreshed, err := o.refreshIssue(runCtx, runIssue.ID)
-		if err != nil {
-			return codex.ContinueDecision{}, err
-		}
-		if refreshed == nil {
-			return codex.ContinueDecision{Continue: false}, nil
-		}
-		if o.cfg.IsTerminalState(refreshed.State) || !o.cfg.IsActiveState(refreshed.State) {
-			return codex.ContinueDecision{
-				Continue:       false,
-				RefreshedIssue: refreshed,
-			}, nil
-		}
-		if session.TurnCount >= o.cfg.Agent.MaxTurns {
-			return codex.ContinueDecision{
-				Continue:       false,
-				StopReason:     "max_turns_reached",
-				RefreshedIssue: refreshed,
-			}, nil
-		}
-		return codex.ContinueDecision{
-			Continue:       true,
-			NextPrompt:     workflow.RenderContinuationPrompt(*refreshed, session.TurnCount+1),
-			RefreshedIssue: refreshed,
-		}, nil
-	})
+	}, continueFn)
 
 	afterRunErr := o.workspaces.AfterRun(context.Background(), workspace)
 	if err == nil && afterRunErr != nil {
@@ -726,11 +835,14 @@ func (o *Orchestrator) executeAttempt(ctx context.Context, issue domain.Issue, a
 		err = afterRunErr
 	}
 	if err == nil {
-		completedIssue, transitionErr := o.completeIssueIfNeeded(ctx, runIssue, result)
+		completedIssue, stopReason, transitionErr := o.completeIssueIfNeeded(ctx, runIssue, workspace, result)
 		if transitionErr != nil {
 			err = transitionErr
 		} else if completedIssue != nil {
 			result.RefreshedIssue = completedIssue
+		}
+		if stopReason != "" {
+			result.StopReason = stopReason
 		}
 	}
 
@@ -742,6 +854,20 @@ func (o *Orchestrator) executeAttempt(ctx context.Context, issue domain.Issue, a
 		Refreshed: result.RefreshedIssue,
 		Err:       err,
 	})
+}
+
+func (o *Orchestrator) startIssueForAttempt(ctx context.Context, issue domain.Issue) (domain.Issue, error) {
+	if o.reviewMode {
+		return issue, nil
+	}
+	return o.transitionIssueState(ctx, issue, startStateName, "issue moved to in-progress")
+}
+
+func (o *Orchestrator) augmentPrompt(prompt string, workspace domain.Workspace) string {
+	if o.reviewMode {
+		return appendReviewPromptContract(prompt, workspace)
+	}
+	return appendCodingReviewNotesGuidance(prompt, workspace)
 }
 
 func (o *Orchestrator) transitionIssueState(ctx context.Context, issue domain.Issue, targetState, message string) (domain.Issue, error) {
@@ -786,35 +912,57 @@ func (o *Orchestrator) transitionIssueState(ctx context.Context, issue domain.Is
 	return transitioned, nil
 }
 
-func (o *Orchestrator) completeIssueIfNeeded(ctx context.Context, issue domain.Issue, result codex.RunResult) (*domain.Issue, error) {
+func (o *Orchestrator) completeIssueIfNeeded(ctx context.Context, issue domain.Issue, workspace domain.Workspace, result codex.RunResult) (*domain.Issue, string, error) {
+	if o.reviewMode {
+		verdict, err := loadReviewVerdict(workspace)
+		if err != nil {
+			return nil, "", err
+		}
+		switch verdict.Decision {
+		case reviewDecisionDone:
+			completed, err := o.transitionIssueState(ctx, coalesceIssue(result.RefreshedIssue, issue), doneStateName, "review accepted and issue moved to done")
+			if err != nil {
+				return nil, "", err
+			}
+			return &completed, "", nil
+		case reviewDecisionTodo:
+			reopened, err := o.transitionIssueState(ctx, coalesceIssue(result.RefreshedIssue, issue), "Todo", "review found blocking issues and moved issue back to todo")
+			if err != nil {
+				return nil, "", err
+			}
+			return &reopened, reviewRejectedStopReason, nil
+		default:
+			return nil, "", fmt.Errorf("unsupported review decision %q", verdict.Decision)
+		}
+	}
 	if result.StopReason == "max_turns_reached" {
 		handoffIssue := coalesceIssue(result.RefreshedIssue, issue)
 		if o.cfg.IsActiveState(handoffIssue.State) && !o.cfg.IsTerminalState(handoffIssue.State) {
 			handoff, err := o.transitionIssueState(ctx, handoffIssue, reviewStateName, "issue moved to in-review after max turns reached")
 			if err != nil {
-				return nil, err
+				return nil, "", err
 			}
-			return &handoff, nil
+			return &handoff, "", nil
 		}
-		return result.RefreshedIssue, nil
+		return result.RefreshedIssue, "", nil
 	}
 	if result.StopReason != "" {
-		return result.RefreshedIssue, nil
+		return result.RefreshedIssue, "", nil
 	}
 	if result.RefreshedIssue != nil {
 		switch {
 		case o.cfg.IsTerminalState(result.RefreshedIssue.State):
-			return result.RefreshedIssue, nil
+			return result.RefreshedIssue, "", nil
 		case !o.cfg.IsActiveState(result.RefreshedIssue.State):
-			return result.RefreshedIssue, nil
+			return result.RefreshedIssue, "", nil
 		}
 	}
 
 	completed, err := o.transitionIssueState(ctx, coalesceIssue(result.RefreshedIssue, issue), doneStateName, "issue moved to done")
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return &completed, nil
+	return &completed, "", nil
 }
 
 func (o *Orchestrator) applyWorkerEvent(st *state, event workerEvent) {
@@ -842,6 +990,7 @@ func (o *Orchestrator) applyWorkerEvent(st *state, event workerEvent) {
 			StartedAt:    event.Event.At,
 			AppServerPID: event.Event.AppServerPID,
 			TurnCount:    entry.attempt,
+			Worker:       o.workerName,
 		}
 	}
 
@@ -851,6 +1000,7 @@ func (o *Orchestrator) applyWorkerEvent(st *state, event workerEvent) {
 	entry.liveSession.LastEvent = event.Event.Type
 	entry.liveSession.LastEventAt = event.Event.At
 	entry.liveSession.LastMessage = event.Event.Message
+	entry.liveSession.Worker = o.workerName
 	if event.Event.TurnCount > 0 {
 		entry.liveSession.TurnCount = event.Event.TurnCount
 	}
@@ -1001,6 +1151,28 @@ func (o *Orchestrator) applyWorkerExit(ctx context.Context, st *state, exit work
 			slog.Int("attempt", exit.Attempt),
 		)
 		o.asyncCleanup(*exit.Refreshed, exit.Workspace)
+	case exit.Err == nil && exit.Result.StopReason == reviewRejectedStopReason && exit.Refreshed != nil:
+		delete(st.claimed, exit.Issue.ID)
+		o.recordTimeline(st, *exit.Refreshed, exit.Workspace, domain.TimelineEvent{
+			At:           time.Now().UTC(),
+			IssueID:      exit.Refreshed.ID,
+			Identifier:   exit.Refreshed.Identifier,
+			Attempt:      exit.Attempt,
+			Event:        "issue_released",
+			Status:       "released",
+			Reason:       reviewRejectedStopReason,
+			StateAfter:   exit.Refreshed.State,
+			SessionID:    exit.Result.Session.SessionID,
+			ThreadID:     exit.Result.Session.ThreadID,
+			TurnID:       exit.Result.Session.TurnID,
+			WorkspaceKey: exit.Workspace.WorkspaceKey,
+			Workspace:    exit.Workspace.Path,
+			Message:      "review found blocking issues and released the issue back to todo",
+		})
+		o.logger.Info("issue returned to todo after review",
+			slog.String("issue", exit.Refreshed.Identifier),
+			slog.Int("attempt", exit.Attempt),
+		)
 	case exit.Err == nil && exit.Refreshed != nil && !o.cfg.IsActiveState(exit.Refreshed.State):
 		st.completed[exit.Refreshed.Identifier] = struct{}{}
 		delete(st.claimed, exit.Issue.ID)
@@ -1064,6 +1236,23 @@ func (o *Orchestrator) applyWorkerExit(ctx context.Context, st *state, exit work
 		o.logger.Info("stopping issue after non-active state change",
 			slog.String("issue", entry.issue.Identifier),
 			slog.String("state", entry.issue.State),
+		)
+	case entry.stopReason == "missing_issue":
+		delete(st.claimed, exit.Issue.ID)
+		o.recordTimeline(st, entry.issue, exit.Workspace, domain.TimelineEvent{
+			At:           time.Now().UTC(),
+			IssueID:      entry.issue.ID,
+			Identifier:   entry.issue.Identifier,
+			Attempt:      exit.Attempt,
+			Event:        "issue_released",
+			Status:       "released",
+			Reason:       "missing_issue",
+			WorkspaceKey: exit.Workspace.WorkspaceKey,
+			Workspace:    exit.Workspace.Path,
+			Message:      "run stopped because the issue was missing from tracker refresh",
+		})
+		o.logger.Info("stopping issue after tracker refresh omitted it",
+			slog.String("issue", entry.issue.Identifier),
 		)
 	case exit.Err == nil && exit.Refreshed != nil && o.cfg.IsActiveState(exit.Refreshed.State):
 		reason := "active_still_open"
@@ -1226,6 +1415,7 @@ func (o *Orchestrator) publishSnapshot(st *state) {
 		RateLimits:     domain.SortedRateLimits(st.rateLimits),
 		Completed:      completed,
 	})
+	o.history.Store(cloneHistoryMap(st.history))
 }
 
 func (o *Orchestrator) recordTimeline(st *state, issue domain.Issue, workspace domain.Workspace, event domain.TimelineEvent) {
@@ -1409,19 +1599,6 @@ func coalesceIssue(preferred *domain.Issue, fallback domain.Issue) domain.Issue 
 	return fallback
 }
 
-func issueHistory(activity []domain.TimelineEvent, identifier string) []domain.TimelineEvent {
-	if strings.TrimSpace(identifier) == "" {
-		return nil
-	}
-	history := make([]domain.TimelineEvent, 0, 8)
-	for _, event := range activity {
-		if event.Identifier == identifier {
-			history = append(history, event)
-		}
-	}
-	return history
-}
-
 func reverseTimeline(events []domain.TimelineEvent) []domain.TimelineEvent {
 	if len(events) == 0 {
 		return nil
@@ -1431,6 +1608,103 @@ func reverseTimeline(events []domain.TimelineEvent) []domain.TimelineEvent {
 		reversed = append(reversed, events[i])
 	}
 	return reversed
+}
+
+func (o *Orchestrator) issueHistory(identifier string) []domain.TimelineEvent {
+	if strings.TrimSpace(identifier) == "" {
+		return nil
+	}
+	value, _ := o.history.Load().(map[string][]domain.TimelineEvent)
+	return cloneTimelineEvents(value[identifier])
+}
+
+func cloneHistoryMap(history map[string][]domain.TimelineEvent) map[string][]domain.TimelineEvent {
+	if len(history) == 0 {
+		return map[string][]domain.TimelineEvent{}
+	}
+	cloned := make(map[string][]domain.TimelineEvent, len(history))
+	for identifier, events := range history {
+		cloned[identifier] = cloneTimelineEvents(events)
+	}
+	return cloned
+}
+
+func cloneTimelineEvents(events []domain.TimelineEvent) []domain.TimelineEvent {
+	if len(events) == 0 {
+		return nil
+	}
+	cloned := make([]domain.TimelineEvent, len(events))
+	copy(cloned, events)
+	return cloned
+}
+
+func sortDispatchCandidates(candidates []domain.Issue) {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left := candidates[i]
+		right := candidates[j]
+
+		leftPriority := dispatchPriority(left.Priority)
+		rightPriority := dispatchPriority(right.Priority)
+		if leftPriority != rightPriority {
+			return leftPriority < rightPriority
+		}
+
+		switch {
+		case left.CreatedAt.IsZero() && right.CreatedAt.IsZero():
+		case left.CreatedAt.IsZero():
+			return false
+		case right.CreatedAt.IsZero():
+			return true
+		case !left.CreatedAt.Equal(right.CreatedAt):
+			return left.CreatedAt.Before(right.CreatedAt)
+		}
+
+		return strings.Compare(left.Identifier, right.Identifier) < 0
+	})
+}
+
+func dispatchPriority(priority int) int {
+	if priority <= 0 {
+		return 1_000_000
+	}
+	return priority
+}
+
+func (o *Orchestrator) startupCleanup(ctx context.Context) {
+	issues, err := o.tracker.PollTerminalIssues(ctx)
+	if err != nil {
+		o.logger.Warn("startup terminal cleanup failed", slog.Any("error", err))
+		return
+	}
+	if len(issues) == 0 {
+		return
+	}
+
+	for _, issue := range issues {
+		identifier := strings.TrimSpace(issue.Identifier)
+		if identifier == "" {
+			continue
+		}
+		workspace := domain.Workspace{
+			WorkspaceKey: domain.SanitizeWorkspaceKey(identifier),
+			Path:         filepath.Join(o.cfg.Workspace.Root, domain.SanitizeWorkspaceKey(identifier)),
+		}
+		cleanupCtx, cancel := context.WithTimeout(ctx, o.cfg.Hooks.Timeout)
+		err := o.workspaces.Cleanup(cleanupCtx, workspace)
+		cancel()
+		if err != nil {
+			o.logger.Warn("startup terminal workspace cleanup failed",
+				slog.String("issue", identifier),
+				slog.String("workspace", workspace.Path),
+				slog.Any("error", err),
+			)
+			continue
+		}
+		o.logger.Info("startup terminal workspace cleaned",
+			slog.String("issue", identifier),
+			slog.String("workspace", workspace.Path),
+		)
+	}
 }
 
 func truncateLogValue(value string, limit int) string {

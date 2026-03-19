@@ -237,6 +237,67 @@ func TestClientTransitionStateFallsBackToCompletedWorkflowState(t *testing.T) {
 	}
 }
 
+func TestClientPollTerminalIssuesUsesTerminalStates(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload graphqlRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+
+		switch {
+		case strings.Contains(payload.Query, "projects(filter: {slugId: {eq: $projectRef}}"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"projects": map[string]any{
+						"nodes": []map[string]any{
+							{"slugId": "TEST", "name": "Test Project"},
+						},
+					},
+				},
+			})
+		case payload.Variables["projectRef"] == "TEST":
+			stateNames, _ := payload.Variables["stateNames"].([]any)
+			if len(stateNames) != 2 || stateNames[0] != "Done" || stateNames[1] != "Cancelled" {
+				t.Fatalf("stateNames = %#v, want terminal states", payload.Variables["stateNames"])
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"issues": map[string]any{
+						"nodes": []map[string]any{
+							sampleIssuePayload("ABC-7"),
+						},
+						"pageInfo": map[string]any{
+							"hasNextPage": false,
+							"endCursor":   "",
+						},
+					},
+				},
+			})
+		default:
+			t.Fatalf("unexpected query: %s", payload.Query)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.Client(), config.TrackerConfig{
+		Endpoint:       server.URL,
+		APIKey:         "token-123",
+		ProjectSlug:    "TEST",
+		ActiveStates:   []string{"Todo", "In Progress"},
+		TerminalStates: []string{"Done", "Cancelled"},
+	})
+
+	issues, err := client.PollTerminalIssues(context.Background())
+	if err != nil {
+		t.Fatalf("PollTerminalIssues() error = %v", err)
+	}
+	if len(issues) != 1 || issues[0].Identifier != "ABC-7" {
+		t.Fatalf("PollTerminalIssues() = %#v", issues)
+	}
+}
+
 func TestClientPollCandidatesFallsBackToProjectName(t *testing.T) {
 	t.Parallel()
 

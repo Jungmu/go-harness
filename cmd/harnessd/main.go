@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -54,19 +55,61 @@ func runDaemon(args []string) int {
 		return 1
 	}
 
-	var levelVar slog.LevelVar
-	levelVar.Set(parseLogLevel(cfg.Logging.Level))
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: &levelVar}))
+	var codingLevelVar slog.LevelVar
+	codingLevelVar.Set(parseLogLevel(cfg.Logging.Level))
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: &codingLevelVar}))
+	codingLogger := logger.With("worker", "coding")
 
 	if port > 0 {
 		cfg.Server.Port = port
 	}
 
 	trackerClient := &dynamicTracker{store: store, httpClient: http.DefaultClient}
-	workspaceManager := &dynamicWorkspaceManager{store: store, logger: logger}
-	runner := &dynamicRunner{store: store, logger: logger}
-	configSource := &loggingConfigSource{store: store, levelVar: &levelVar}
-	orch := orchestrator.New(cfg, trackerClient, workspaceManager, runner, logger, orchestrator.WithConfigSource(configSource))
+	workspaceManager := &dynamicWorkspaceManager{store: store, logger: codingLogger}
+	runner := &dynamicRunner{store: store, logger: codingLogger}
+	configSource := &loggingConfigSource{store: store, levelVar: &codingLevelVar}
+	orch := orchestrator.New(cfg, trackerClient, workspaceManager, runner, codingLogger, orchestrator.WithConfigSource(configSource), orchestrator.WithWorkerName("coding"))
+
+	var reviewOrch *orchestrator.Orchestrator
+	reviewPath, foundReview, err := config.ResolveSiblingWorkflowPath(cfg.SourcePath, config.ReviewWorkflowFilename)
+	if err != nil {
+		logger.Error("failed to resolve review workflow", slog.Any("error", err))
+		return 1
+	}
+	if foundReview {
+		reviewStore := config.NewStore(workflow.NewLoader())
+		reviewStore.SetValidator(func(reviewCfg config.RuntimeConfig) error {
+			return config.ValidateReviewWorkflow(store.Current(), reviewCfg)
+		})
+		reviewCfg, err := reviewStore.LoadAndValidate(reviewPath)
+		if err != nil {
+			logger.Error("failed to load review configuration", slog.Any("error", err))
+			return 1
+		}
+		var reviewLevelVar slog.LevelVar
+		reviewLevelVar.Set(parseLogLevel(reviewCfg.Logging.Level))
+		reviewLogger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: &reviewLevelVar})).With("worker", "review")
+		reviewTracker := &dynamicTracker{store: reviewStore, httpClient: http.DefaultClient}
+		reviewWorkspaceManager := &dynamicWorkspaceManager{store: reviewStore, logger: reviewLogger}
+		reviewRunner := &dynamicRunner{store: reviewStore, logger: reviewLogger}
+		reviewConfigSource := &loggingConfigSource{store: reviewStore, levelVar: &reviewLevelVar}
+		reviewOrch = orchestrator.New(reviewCfg, reviewTracker, reviewWorkspaceManager, reviewRunner, reviewLogger, orchestrator.WithConfigSource(reviewConfigSource), orchestrator.WithReviewMode())
+		logStartupConfiguration(reviewLogger, reviewCfg)
+		logger.Info("review workflow enabled", slog.String("review_workflow_path", reviewCfg.SourcePath), slog.String("workflow_dir", filepath.Dir(reviewCfg.SourcePath)))
+	} else {
+		logger.Info("review workflow disabled", slog.String("expected_path", filepath.Join(filepath.Dir(cfg.SourcePath), config.ReviewWorkflowFilename)))
+	}
+
+	runtime := &runtimeSurface{
+		codingSnapshot:      orch.Snapshot,
+		codingIssueSnapshot: orch.IssueSnapshot,
+		codingRefresh:       orch.TriggerRefresh,
+	}
+	if reviewOrch != nil {
+		runtime.reviewSnapshot = reviewOrch.Snapshot
+		runtime.reviewIssueSnapshot = reviewOrch.IssueSnapshot
+		runtime.reviewRefresh = reviewOrch.TriggerRefresh
+	}
 
 	rootCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
@@ -74,6 +117,13 @@ func runDaemon(args []string) int {
 	if err := orch.Start(rootCtx); err != nil {
 		logger.Error("failed to start orchestrator", slog.Any("error", err))
 		return 1
+	}
+	if reviewOrch != nil {
+		if err := reviewOrch.Start(rootCtx); err != nil {
+			logger.Error("failed to start review orchestrator", slog.Any("error", err))
+			_ = orch.Stop(context.Background())
+			return 1
+		}
 	}
 
 	logger.Info("harness daemon started",
@@ -89,7 +139,7 @@ func runDaemon(args []string) int {
 	if cfg.Server.Port > 0 {
 		httpServer = &http.Server{
 			Addr:    fmt.Sprintf("127.0.0.1:%d", cfg.Server.Port),
-			Handler: server.NewHandler(orch.Snapshot, orch.IssueSnapshot, orch.TriggerRefresh),
+			Handler: server.NewHandler(runtime.Snapshot, runtime.IssueSnapshot, runtime.TriggerRefresh),
 		}
 
 		go func() {
@@ -115,6 +165,12 @@ func runDaemon(args []string) int {
 	if err := orch.Stop(shutdownCtx); err != nil {
 		logger.Error("failed to stop orchestrator", slog.Any("error", err))
 		return 1
+	}
+	if reviewOrch != nil {
+		if err := reviewOrch.Stop(shutdownCtx); err != nil {
+			logger.Error("failed to stop review orchestrator", slog.Any("error", err))
+			return 1
+		}
 	}
 
 	return 0

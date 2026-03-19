@@ -1,6 +1,6 @@
 # Go Harness
 
-Go Harness is a Go implementation of a Symphony-style automation service. It polls Linear issues, prepares an isolated workspace per issue, renders a repository-owned `WORKFLOW.md`, and runs a local Codex app-server session inside that workspace.
+Go Harness is a Go implementation of a Symphony-style automation service. It polls Linear issues, prepares an isolated workspace per issue, renders a repository-owned `WORKFLOW.md`, and runs a local Codex app-server session inside that workspace. If a sibling `REVIEW-WORKFLOW.md` exists, the same daemon also runs a review lane for `In Review` issues.
 
 This repository currently contains a working runtime slice for local operation:
 
@@ -10,8 +10,10 @@ This repository currently contains a working runtime slice for local operation:
 - local Codex app-server execution
 - orchestrator-owned retry, cancellation, and runtime snapshots
 - automatic Linear state transitions to `In Progress` on start and `Done` on successful completion
+- optional in-process review lane driven by `REVIEW-WORKFLOW.md`
 - issue timeline logging to `.harness-history/*.jsonl` under `workspace.root`
 - HTTP status endpoints, HTML dashboard, and CLI `status`
+- startup terminal-workspace cleanup and deterministic dispatch ordering
 
 ## Current Scope
 
@@ -31,6 +33,7 @@ More detail lives in `PLAN.md`, `SPEC.md`, and the docs under `docs/`.
 - `codex` installed and available on `PATH`
 - a Linear API key
 - a `WORKFLOW.md` file for the repository you want the harness to operate against
+- an optional sibling `REVIEW-WORKFLOW.md` if you want the daemon to process `In Review` issues
 
 ## Build
 
@@ -88,6 +91,7 @@ Notes:
 - if no workflow path is passed, the daemon looks for `WORKFLOW.md` in its current working directory and then next to the executable
 - `server.port` must be set in `WORKFLOW.md` or overridden with `--port` if you want the HTTP API enabled
 - a fuller example is available at `examples/WORKFLOW.md`
+- an optional review-lane example is available at `examples/REVIEW-WORKFLOW.md`
 
 ## Run
 
@@ -114,6 +118,7 @@ Important:
 
 - do not run the daemon with cwd set to this source repository unless this repository itself is the target repo
 - the agent session runs inside per-issue workspaces under `workspace.root`
+- if `REVIEW-WORKFLOW.md` exists next to the active `WORKFLOW.md`, the daemon starts a second in-process review orchestrator
 - set `logging.level: debug` if you want a poll heartbeat and candidate-count logs while the daemon is idle
 - startup logs print the resolved workflow path, `.env` path, and all tracked environment entries with sensitive values redacted
 
@@ -139,14 +144,28 @@ HTTP endpoints:
 - `GET /api/v1/issues/{identifier}`
 - `POST /api/v1/refresh`
 
-The root dashboard auto-refreshes and shows the active workflow file path, `.env` path and tracked env entries, running issues, retry queue, completed identifiers, token totals, and whether dispatch is currently blocked by an invalid workflow reload. Sensitive env values such as API keys are redacted in the dashboard and JSON state.
+The root dashboard auto-refreshes and shows the active workflow file paths, `.env` path and tracked env entries, running issues, retry queue, completed identifiers, worker labels, token totals, and whether dispatch is currently blocked by an invalid workflow reload. Sensitive env values such as API keys are redacted in the dashboard and JSON state.
 
 Execution history:
 
 - the harness records issue-level timeline events in memory and exposes them as `recent_activity` in `GET /api/v1/state`
 - the dashboard renders the same timeline in the `Recent Activity` panel
+- `GET /api/v1/issues/{identifier}` returns the per-issue in-memory history buffer, not just the global recent-activity window
 - the harness also appends per-issue JSONL history files under `workspace.root/.harness-history/`
 - cleanup removes the workspace directory, but not the `.harness-history` audit trail
+
+Review lane:
+
+- if `REVIEW-WORKFLOW.md` exists next to the active `WORKFLOW.md`, the daemon starts a review lane that polls `In Review` issues
+- the review lane runs one Codex turn per attempt and expects `.harness/review-result.json` plus `.harness/review-notes.md` in the issue workspace
+- a review verdict with `decision="done"` transitions the issue to `Done`
+- a review verdict with `decision="todo"` transitions the issue back to `Todo` and preserves the workspace
+- invalid or missing review artifacts fail the attempt and use the normal retry policy
+
+Dispatch order:
+
+- candidate issues are dispatched in deterministic order: `priority` ascending, then `created_at` ascending, then `identifier`
+- issues missing from tracker refresh are released from running or retry state instead of keeping a stuck claim
 
 Issue state transitions:
 
@@ -154,6 +173,13 @@ Issue state transitions:
 - if the run exits with `max_turns_reached`, the harness moves the issue to `In Review`
 - when a run completes successfully without an explicit retry stop reason, the harness moves the issue to `Done`
 - if the run exits with cancellation or another retry path, the issue is left in its current state
+- when a review attempt returns `decision="todo"`, the harness moves the issue back to `Todo` without cleaning the workspace
+
+Startup cleanup:
+
+- on startup, the harness fetches terminal issues for the configured project and removes matching workspaces under `workspace.root`
+- startup cleanup keeps `.harness-history` files and only removes per-issue workspace directories
+- cleanup fetch failures are logged as warnings and do not block daemon startup
 
 ## Live E2E
 
@@ -226,6 +252,7 @@ Supported prompt variables and reload behavior are also documented there.
 - `docs/architecture.md`: implemented component boundaries and status surfaces
 - `docs/workflow-contract.md`: exact `WORKFLOW.md` behavior and defaults
 - `examples/WORKFLOW.md`: a fuller starter workflow for local Linear + Codex setups
+- `examples/REVIEW-WORKFLOW.md`: a fuller starter review workflow for `In Review` issues
 
 ## Limitations
 

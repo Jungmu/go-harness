@@ -170,11 +170,19 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         <h1>Go Harness</h1>
         <p>Last snapshot: <span class="mono">{{ formatTime .GeneratedAt }}</span></p>
         <p>Workflow: <span class="mono">{{ if .Workflow.Path }}{{ .Workflow.Path }}{{ else }}-{{ end }}</span></p>
+        <p>Review workflow: <span class="mono">{{ if .Workflow.ReviewPath }}{{ .Workflow.ReviewPath }}{{ else }}-{{ end }}</span></p>
         <p>Env file: <span class="mono">{{ if .Environment.DotEnvPath }}{{ .Environment.DotEnvPath }}{{ else }}-{{ end }}</span> {{ if .Environment.DotEnvPresent }}(present){{ else }}(missing){{ end }}</p>
         {{ if .Dispatch.Blocked }}
         <p class="dispatch-blocked"><strong>Dispatch blocked</strong>: {{ .Dispatch.Error }}</p>
         {{ else }}
         <p class="dispatch-ok"><strong>Dispatch healthy</strong></p>
+        {{ end }}
+        {{ if .Dispatch.Workers }}
+        <ul>
+          {{ range .Dispatch.Workers }}
+          <li><span class="mono">{{ .Worker }}</span>: {{ if .Blocked }}blocked{{ else }}healthy{{ end }}{{ if .Error }} ({{ .Error }}){{ end }}</li>
+          {{ end }}
+        </ul>
         {{ end }}
         <div class="actions">
           <form method="post" action="/api/v1/refresh">
@@ -210,7 +218,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
         {{ if .Running }}
         <table>
           <thead>
-            <tr><th>Issue</th><th>Attempt</th><th>Session</th><th>Workspace</th></tr>
+            <tr><th>Issue</th><th>Worker</th><th>Attempt</th><th>Session</th><th>Workspace</th></tr>
           </thead>
           <tbody>
             {{ range .Running }}
@@ -220,6 +228,7 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
                 <div>{{ .Issue.Title }}</div>
                 <div class="mono">{{ .Issue.State }}</div>
               </td>
+              <td class="mono">{{ if .LiveSession }}{{ if .LiveSession.Worker }}{{ .LiveSession.Worker }}{{ else }}-{{ end }}{{ else }}-{{ end }}</td>
               <td>{{ .Attempt }}</td>
               <td class="mono">{{ if .LiveSession }}{{ .LiveSession.SessionID }}{{ else }}-{{ end }}</td>
               <td class="mono">{{ .Workspace.Path }}</td>
