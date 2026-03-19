@@ -8,6 +8,7 @@ This repository is a Go implementation plan for a Symphony-style harness. Follow
 - Keep changes narrowly scoped. Do not mix unrelated refactors into the same change.
 - Prefer small, explicit functions and standard library building blocks over framework-heavy abstractions.
 - When a task matches a repo-local skill in `.agents/skills/`, use that skill before inventing a new workflow.
+- When renaming or replacing tests, update every checked-in caller in the same change, including `Makefile`, scripts, docs, and CI-facing command snippets.
 - Add new project-specific rules here. Use `AGENTS.override.md` only in subdirectories that genuinely need different rules.
 
 ## Architecture Invariants

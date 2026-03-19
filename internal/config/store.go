@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +28,7 @@ const (
 	defaultStallTimeout    = 5 * time.Minute
 	defaultApprovalPolicy  = "never"
 	defaultThreadSandbox   = "workspace-write"
+	defaultLogLevel        = "info"
 )
 
 var (
@@ -48,12 +51,14 @@ type Store struct {
 type RuntimeConfig struct {
 	SourcePath     string
 	PromptTemplate string
+	Environment    EnvironmentConfig
 	Tracker        TrackerConfig
 	Polling        PollingConfig
 	Workspace      WorkspaceConfig
 	Hooks          HooksConfig
 	Agent          AgentConfig
 	Codex          CodexConfig
+	Logging        LoggingConfig
 	Server         ServerConfig
 }
 
@@ -105,6 +110,22 @@ type ServerConfig struct {
 	Port int
 }
 
+type LoggingConfig struct {
+	Level string
+}
+
+type EnvironmentConfig struct {
+	DotEnvPath    string
+	DotEnvPresent bool
+	Entries       []EnvironmentEntry
+}
+
+type EnvironmentEntry struct {
+	Name   string
+	Value  string
+	Source string
+}
+
 type ValidationError struct {
 	Field   string
 	Message string
@@ -118,6 +139,8 @@ type fileState struct {
 type envResolver struct {
 	dotEnv map[string]string
 }
+
+var envVarPattern = regexp.MustCompile(`\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))`)
 
 func (e *ValidationError) Error() string {
 	return fmt.Sprintf("invalid %s: %s", e.Field, e.Message)
@@ -235,7 +258,7 @@ func applyConfig(cfg *RuntimeConfig, raw map[string]any, env envResolver) error 
 		cfg.Tracker.Kind = stringValue(trackerMap, "kind", cfg.Tracker.Kind)
 		cfg.Tracker.Endpoint = stringValue(trackerMap, "endpoint", cfg.Tracker.Endpoint)
 		cfg.Tracker.APIKey = resolveSecret(stringValue(trackerMap, "api_key", cfg.Tracker.APIKey), env)
-		cfg.Tracker.ProjectSlug = stringValue(trackerMap, "project_slug", cfg.Tracker.ProjectSlug)
+		cfg.Tracker.ProjectSlug = resolveEnvReference(stringValue(trackerMap, "project_slug", cfg.Tracker.ProjectSlug), env)
 		if states := stringSliceValue(trackerMap, "active_states"); len(states) > 0 {
 			cfg.Tracker.ActiveStates = states
 		}
@@ -303,6 +326,10 @@ func applyConfig(cfg *RuntimeConfig, raw map[string]any, env envResolver) error 
 		}
 	}
 
+	if loggingMap := mapValue(raw, "logging"); loggingMap != nil {
+		cfg.Logging.Level = stringValue(loggingMap, "level", cfg.Logging.Level)
+	}
+
 	if serverMap := mapValue(raw, "server"); serverMap != nil {
 		if value, ok := intValue(serverMap, "port"); ok {
 			cfg.Server.Port = value
@@ -353,6 +380,12 @@ func validateAndNormalize(cfg *RuntimeConfig, env envResolver) error {
 	if cfg.Codex.StallTimeout <= 0 {
 		return &ValidationError{Field: "codex.stall_timeout_ms", Message: "must be positive"}
 	}
+	switch strings.ToLower(strings.TrimSpace(cfg.Logging.Level)) {
+	case "debug", "info", "warn", "error":
+		cfg.Logging.Level = strings.ToLower(strings.TrimSpace(cfg.Logging.Level))
+	default:
+		return &ValidationError{Field: "logging.level", Message: "must be one of debug, info, warn, error"}
+	}
 	if cfg.Server.Port < 0 {
 		return &ValidationError{Field: "server.port", Message: "must be non-negative"}
 	}
@@ -376,10 +409,51 @@ func resolveWorkflowPath(path string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		path = filepath.Join(cwd, "WORKFLOW.md")
+		cwdPath := filepath.Join(cwd, "WORKFLOW.md")
+		executablePath := executableWorkflowPath()
+
+		resolved, err := firstExistingPath(cwdPath, executablePath)
+		if err != nil {
+			return "", err
+		}
+		if resolved == "" {
+			path = cwdPath
+			if executablePath != "" && filepath.Clean(executablePath) != filepath.Clean(cwdPath) {
+				path = executablePath
+			}
+		} else {
+			path = resolved
+		}
 	}
 
 	return filepath.Abs(path)
+}
+
+func executableWorkflowPath() string {
+	executablePath, err := os.Executable()
+	if err != nil || strings.TrimSpace(executablePath) == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(executablePath), "WORKFLOW.md")
+}
+
+func firstExistingPath(paths ...string) (string, error) {
+	for _, path := range paths {
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		info, err := os.Stat(path)
+		if err == nil {
+			if info.IsDir() {
+				continue
+			}
+			return path, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+	}
+	return "", nil
 }
 
 func (s *Store) loadConfig(path, envPath string) (RuntimeConfig, time.Time, fileState, error) {
@@ -396,6 +470,10 @@ func (s *Store) loadConfig(path, envPath string) (RuntimeConfig, time.Time, file
 	cfg := RuntimeConfig{
 		SourcePath:     definition.SourcePath,
 		PromptTemplate: definition.PromptTemplate,
+		Environment: EnvironmentConfig{
+			DotEnvPath:    envPath,
+			DotEnvPresent: dotEnvState.exists,
+		},
 		Tracker: TrackerConfig{
 			Endpoint:       defaultLinearEndpoint,
 			ActiveStates:   append([]string{}, defaultActiveStates...),
@@ -421,6 +499,9 @@ func (s *Store) loadConfig(path, envPath string) (RuntimeConfig, time.Time, file
 			ReadTimeout:       defaultReadTimeout,
 			StallTimeout:      defaultStallTimeout,
 		},
+		Logging: LoggingConfig{
+			Level: defaultLogLevel,
+		},
 	}
 
 	if err := applyConfig(&cfg, definition.Config, env); err != nil {
@@ -429,6 +510,7 @@ func (s *Store) loadConfig(path, envPath string) (RuntimeConfig, time.Time, file
 	if err := validateAndNormalize(&cfg, env); err != nil {
 		return RuntimeConfig{}, time.Time{}, fileState{}, err
 	}
+	cfg.Environment.Entries = buildEnvironmentEntries(definition.Config, env)
 
 	info, err := os.Stat(definition.SourcePath)
 	if err != nil {
@@ -514,6 +596,15 @@ func resolveSecret(value string, env envResolver) string {
 		return strings.TrimSpace(value)
 	}
 	resolved, _ := env.Lookup(strings.TrimPrefix(value, "$"))
+	return strings.TrimSpace(resolved)
+}
+
+func resolveEnvReference(value string, env envResolver) string {
+	trimmed := strings.TrimSpace(value)
+	if !strings.HasPrefix(trimmed, "$") {
+		return trimmed
+	}
+	resolved, _ := env.Lookup(strings.TrimPrefix(trimmed, "$"))
 	return strings.TrimSpace(resolved)
 }
 
@@ -653,4 +744,88 @@ func makeStateSet(states []string) map[string]struct{} {
 		result[domain.NormalizeState(state)] = struct{}{}
 	}
 	return result
+}
+
+func buildEnvironmentEntries(raw map[string]any, env envResolver) []EnvironmentEntry {
+	keys := referencedEnvKeys(raw)
+	for key := range env.dotEnv {
+		keys[key] = struct{}{}
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+
+	sorted := make([]string, 0, len(keys))
+	for key := range keys {
+		sorted = append(sorted, key)
+	}
+	slices.Sort(sorted)
+
+	entries := make([]EnvironmentEntry, 0, len(sorted))
+	for _, key := range sorted {
+		entry := EnvironmentEntry{Name: key, Source: "missing"}
+		if value, ok := os.LookupEnv(key); ok {
+			entry.Source = "process"
+			entry.Value = redactEnvValue(key, value)
+		} else if value, ok := env.dotEnv[key]; ok {
+			entry.Source = ".env"
+			entry.Value = redactEnvValue(key, value)
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+func referencedEnvKeys(value any) map[string]struct{} {
+	result := make(map[string]struct{})
+	collectEnvKeys(result, value)
+	return result
+}
+
+func collectEnvKeys(out map[string]struct{}, value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, item := range typed {
+			collectEnvKeys(out, item)
+		}
+	case []any:
+		for _, item := range typed {
+			collectEnvKeys(out, item)
+		}
+	case string:
+		matches := envVarPattern.FindAllStringSubmatch(typed, -1)
+		for _, match := range matches {
+			key := match[1]
+			if key == "" {
+				key = match[2]
+			}
+			if key != "" {
+				out[key] = struct{}{}
+			}
+		}
+	}
+}
+
+func redactEnvValue(key, value string) string {
+	if value == "" {
+		return ""
+	}
+	name := strings.ToLower(strings.TrimSpace(key))
+	if strings.Contains(name, "key") ||
+		strings.Contains(name, "token") ||
+		strings.Contains(name, "secret") ||
+		strings.Contains(name, "password") ||
+		strings.Contains(name, "passwd") ||
+		strings.Contains(name, "pwd") ||
+		strings.Contains(name, "auth") ||
+		strings.Contains(name, "credential") ||
+		strings.Contains(name, "cookie") ||
+		strings.Contains(name, "session") ||
+		strings.Contains(name, "private") {
+		return "<redacted>"
+	}
+	if len(value) > 512 {
+		return value[:512]
+	}
+	return value
 }

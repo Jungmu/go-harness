@@ -9,7 +9,9 @@ This repository currently contains a working runtime slice for local operation:
 - per-issue workspace preparation and lifecycle hooks
 - local Codex app-server execution
 - orchestrator-owned retry, cancellation, and runtime snapshots
-- HTTP status endpoints and CLI `status`
+- automatic Linear state transitions to `In Progress` on start and `Done` on successful completion
+- issue timeline logging to `.harness-history/*.jsonl` under `workspace.root`
+- HTTP status endpoints, HTML dashboard, and CLI `status`
 
 ## Current Scope
 
@@ -18,8 +20,8 @@ The current implementation is intended for trusted local or small-team environme
 - tracker support: Linear only
 - agent runtime: local `codex app-server`
 - persistence: no database
-- status surface: HTTP + CLI
-- tracker writes: not implemented yet
+- status surface: HTTP + HTML dashboard + CLI
+- tracker writes: automatic `In Progress` and `Done` transitions only
 
 More detail lives in `PLAN.md`, `SPEC.md`, and the docs under `docs/`.
 
@@ -64,6 +66,8 @@ tracker:
   project_slug: my-project
 workspace:
   root: ~/symphony-workspaces
+logging:
+  level: info
 server:
   port: 8080
 ---
@@ -77,8 +81,11 @@ Description: {{ issue.description }}
 Notes:
 
 - `tracker.api_key` may be a literal token or `$ENV_VAR`
+- `tracker.project_slug` accepts a Linear project `slugId` or an exact project name
+- `tracker.project_slug` may also be set via `$ENV_VAR`
 - `workspace.root` supports `~` and environment expansion
-- if no workflow path is passed, the daemon looks for `WORKFLOW.md` in its current working directory
+- `logging.level` accepts `debug`, `info`, `warn`, or `error`
+- if no workflow path is passed, the daemon looks for `WORKFLOW.md` in its current working directory and then next to the executable
 - `server.port` must be set in `WORKFLOW.md` or overridden with `--port` if you want the HTTP API enabled
 - a fuller example is available at `examples/WORKFLOW.md`
 
@@ -97,10 +104,18 @@ cd /path/to/target-repo
 LINEAR_API_KEY=... /path/to/go-harness/bin/harnessd --port 8080
 ```
 
+Or keep `WORKFLOW.md` and `.env` next to the binary in `bin/` and start it without an explicit path:
+
+```bash
+./bin/harnessd --port 8080
+```
+
 Important:
 
 - do not run the daemon with cwd set to this source repository unless this repository itself is the target repo
 - the agent session runs inside per-issue workspaces under `workspace.root`
+- set `logging.level: debug` if you want a poll heartbeat and candidate-count logs while the daemon is idle
+- startup logs print the resolved workflow path, `.env` path, and all tracked environment entries with sensitive values redacted
 
 ## Status And Operations
 
@@ -118,10 +133,27 @@ Read runtime state from the CLI:
 
 HTTP endpoints:
 
+- `GET /`
 - `GET /healthz`
 - `GET /api/v1/state`
 - `GET /api/v1/issues/{identifier}`
 - `POST /api/v1/refresh`
+
+The root dashboard auto-refreshes and shows the active workflow file path, `.env` path and tracked env entries, running issues, retry queue, completed identifiers, token totals, and whether dispatch is currently blocked by an invalid workflow reload. Sensitive env values such as API keys are redacted in the dashboard and JSON state.
+
+Execution history:
+
+- the harness records issue-level timeline events in memory and exposes them as `recent_activity` in `GET /api/v1/state`
+- the dashboard renders the same timeline in the `Recent Activity` panel
+- the harness also appends per-issue JSONL history files under `workspace.root/.harness-history/`
+- cleanup removes the workspace directory, but not the `.harness-history` audit trail
+
+Issue state transitions:
+
+- when a dispatch starts, the harness moves the issue to `In Progress`
+- if the run exits with `max_turns_reached`, the harness moves the issue to `In Review`
+- when a run completes successfully without an explicit retry stop reason, the harness moves the issue to `Done`
+- if the run exits with cancellation or another retry path, the issue is left in its current state
 
 ## Live E2E
 
@@ -129,10 +161,9 @@ The repository includes an opt-in live integration test that exercises:
 
 - real Linear polling against a dedicated test project/state
 - real `codex app-server` execution in an isolated workspace
-- retry scheduling after one turn via `agent.max_turns = 1`
-- terminal-state cleanup after `POST /api/v1/refresh`
+- handoff to `In Review` after one turn via `agent.max_turns = 1`
 
-The test is skipped by default. It creates a temporary Linear issue, waits for the harness to create a deterministic marker file, verifies a retry entry, transitions the issue to a terminal state, and then verifies workspace cleanup.
+The test is skipped by default. It creates a temporary Linear issue, waits for the harness to create a deterministic marker file, and verifies that the harness hands the issue off to `In Review`.
 
 Required environment:
 
@@ -147,6 +178,8 @@ Reference rules:
   - accepts a team UUID, team key, or exact team name
 - `GO_HARNESS_LIVE_LINEAR_PROJECT_SLUG`
   - accepts a project `slugId` or an exact project name
+- `GO_HARNESS_LIVE_LINEAR_HANDOFF_STATE_NAME`
+  - optional; defaults to `In Review`
 
 Optional environment:
 
@@ -181,6 +214,7 @@ Implemented front matter sections:
 - `hooks`
 - `agent`
 - `codex`
+- `logging`
 - `server`
 
 Supported prompt variables and reload behavior are also documented there.
@@ -196,7 +230,7 @@ Supported prompt variables and reload behavior are also documented there.
 ## Limitations
 
 - no persistent scheduler state across restarts
-- no tracker write tools yet
+- no tracker write tools beyond automatic `In Progress` and `Done` transitions
 - no remote worker support
-- no rich dashboard
+- no auth or multi-tenant control plane
 - live Linear + real Codex coverage is opt-in only

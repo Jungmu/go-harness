@@ -40,6 +40,9 @@ func (m *Manager) Prepare(ctx context.Context, issue domain.Issue) (domain.Works
 	if err := os.MkdirAll(m.root, 0o755); err != nil {
 		return domain.Workspace{}, err
 	}
+	if err := m.validateExistingWorkspacePath(m.root, true); err != nil {
+		return domain.Workspace{}, err
+	}
 
 	info, err := os.Lstat(workspace.Path)
 	switch {
@@ -82,8 +85,10 @@ func (m *Manager) Cleanup(ctx context.Context, workspace domain.Workspace) error
 	if err := m.ensureSafePath(workspace.Path); err != nil {
 		return err
 	}
-	if _, err := os.Stat(workspace.Path); os.IsNotExist(err) {
+	if err := m.validateExistingWorkspacePath(workspace.Path, false); os.IsNotExist(err) {
 		return nil
+	} else if err != nil {
+		return err
 	}
 	if err := m.runHook(ctx, workspace.Path, m.hooks.BeforeRemove); err != nil {
 		return fmt.Errorf("before_remove hook failed: %w", err)
@@ -118,13 +123,36 @@ func (m *Manager) runHook(ctx context.Context, cwd, script string) error {
 }
 
 func (m *Manager) ensureSafePath(path string) error {
-	rootAbs := filepath.Clean(m.root)
-	pathAbs := filepath.Clean(path)
+	rootAbs, err := filepath.Abs(filepath.Clean(m.root))
+	if err != nil {
+		return err
+	}
+	pathAbs, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return err
+	}
 	if pathAbs == rootAbs {
 		return fmt.Errorf("workspace path must not equal workspace root: %s", pathAbs)
 	}
 	if !strings.HasPrefix(pathAbs+string(os.PathSeparator), rootAbs+string(os.PathSeparator)) {
 		return fmt.Errorf("workspace path escapes root: %s", pathAbs)
+	}
+	return nil
+}
+
+func (m *Manager) validateExistingWorkspacePath(path string, allowRoot bool) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("workspace path is a symlink: %s", path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("workspace path is not a directory: %s", path)
+	}
+	if !allowRoot && filepath.Clean(path) == filepath.Clean(m.root) {
+		return fmt.Errorf("workspace path must not equal workspace root: %s", path)
 	}
 	return nil
 }

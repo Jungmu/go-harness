@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,7 +19,19 @@ func TestHandlerStateIssueAndRefreshEndpoints(t *testing.T) {
 		func() domain.StateSnapshot {
 			return domain.StateSnapshot{
 				GeneratedAt: time.Date(2026, 3, 18, 9, 0, 0, 0, time.UTC),
-				Counts:      domain.SnapshotCounts{Running: 1},
+				Workflow:    domain.WorkflowStatus{Path: "/repo/WORKFLOW.md"},
+				Environment: domain.EnvironmentStatus{
+					DotEnvPath:    "/repo/.env",
+					DotEnvPresent: true,
+					Entries: []domain.EnvironmentEntry{
+						{Name: "LINEAR_API_KEY", Value: "<redacted>", Source: ".env"},
+					},
+				},
+				Counts:   domain.SnapshotCounts{Running: 1},
+				Dispatch: domain.DispatchStatus{Blocked: true, Error: "invalid workflow"},
+				RecentActivity: []domain.TimelineEvent{
+					{At: time.Date(2026, 3, 18, 8, 59, 0, 0, time.UTC), Identifier: "ABC-1", Event: "issue_claimed"},
+				},
 			}
 		},
 		func(identifier string) (domain.IssueRuntimeSnapshot, bool) {
@@ -29,6 +42,9 @@ func TestHandlerStateIssueAndRefreshEndpoints(t *testing.T) {
 				GeneratedAt: time.Date(2026, 3, 18, 9, 0, 0, 0, time.UTC),
 				Identifier:  identifier,
 				Status:      "running",
+				History: []domain.TimelineEvent{
+					{At: time.Date(2026, 3, 18, 8, 59, 0, 0, time.UTC), Identifier: identifier, Event: "issue_claimed"},
+				},
 			}, true
 		},
 		func() { refreshCount++ },
@@ -39,6 +55,22 @@ func TestHandlerStateIssueAndRefreshEndpoints(t *testing.T) {
 	handler.ServeHTTP(stateRes, stateReq)
 	if stateRes.Code != http.StatusOK {
 		t.Fatalf("GET /api/v1/state status = %d, want 200", stateRes.Code)
+	}
+
+	healthReq := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	healthRes := httptest.NewRecorder()
+	handler.ServeHTTP(healthRes, healthReq)
+	if healthRes.Code != http.StatusOK {
+		t.Fatalf("GET /healthz status = %d, want 200", healthRes.Code)
+	}
+	if !strings.Contains(healthRes.Body.String(), `"blocked":true`) {
+		t.Fatalf("GET /healthz body = %q, want dispatch blocked marker", healthRes.Body.String())
+	}
+	if !strings.Contains(healthRes.Body.String(), `/repo/WORKFLOW.md`) {
+		t.Fatalf("GET /healthz body = %q, want workflow path", healthRes.Body.String())
+	}
+	if !strings.Contains(healthRes.Body.String(), `/repo/.env`) {
+		t.Fatalf("GET /healthz body = %q, want env path", healthRes.Body.String())
 	}
 
 	issueReq := httptest.NewRequest(http.MethodGet, "/api/v1/issues/ABC-1", nil)
@@ -55,6 +87,9 @@ func TestHandlerStateIssueAndRefreshEndpoints(t *testing.T) {
 	if issuePayload.Identifier != "ABC-1" || issuePayload.Status != "running" {
 		t.Fatalf("issue payload = %#v", issuePayload)
 	}
+	if len(issuePayload.History) != 1 || issuePayload.History[0].Event != "issue_claimed" {
+		t.Fatalf("issue history = %#v", issuePayload.History)
+	}
 
 	refreshReq := httptest.NewRequest(http.MethodPost, "/api/v1/refresh", nil)
 	refreshRes := httptest.NewRecorder()
@@ -64,6 +99,65 @@ func TestHandlerStateIssueAndRefreshEndpoints(t *testing.T) {
 	}
 	if refreshCount != 1 {
 		t.Fatalf("refreshCount = %d, want 1", refreshCount)
+	}
+}
+
+func TestHandlerDashboardRendersSnapshot(t *testing.T) {
+	t.Parallel()
+
+	handler := NewHandler(
+		func() domain.StateSnapshot {
+			return domain.StateSnapshot{
+				GeneratedAt: time.Date(2026, 3, 18, 9, 0, 0, 0, time.UTC),
+				Workflow:    domain.WorkflowStatus{Path: "/repo/WORKFLOW.md"},
+				Environment: domain.EnvironmentStatus{
+					DotEnvPath:    "/repo/.env",
+					DotEnvPresent: true,
+					Entries: []domain.EnvironmentEntry{
+						{Name: "LINEAR_API_KEY", Value: "<redacted>", Source: ".env"},
+						{Name: "GO_HARNESS_LIVE_LINEAR_PROJECT_SLUG", Value: "test", Source: "process"},
+					},
+				},
+				Counts:   domain.SnapshotCounts{Running: 1, Retrying: 1},
+				Dispatch: domain.DispatchStatus{Blocked: true, Error: "invalid workflow"},
+				Running: []domain.RunningSnapshot{
+					{
+						Issue:     domain.Issue{Identifier: "ABC-1", Title: "Example", State: "In Progress"},
+						Attempt:   2,
+						Workspace: domain.Workspace{Path: "/tmp/ABC-1"},
+						LiveSession: &domain.LiveSession{
+							SessionID: "thread-1-turn-2",
+						},
+					},
+				},
+				Retrying: []domain.RetryEntry{
+					{Identifier: "ABC-2", Attempt: 3, Reason: "attempt_failed", DueAt: time.Date(2026, 3, 18, 9, 1, 0, 0, time.UTC)},
+				},
+				RecentActivity: []domain.TimelineEvent{
+					{At: time.Date(2026, 3, 18, 9, 0, 30, 0, time.UTC), Identifier: "ABC-1", Event: "issue_claimed", Attempt: 2, Message: "issue claimed for execution"},
+					{At: time.Date(2026, 3, 18, 9, 0, 45, 0, time.UTC), Identifier: "ABC-1", Event: "tracker_state_transition", StateBefore: "Todo", StateAfter: "In Progress", Message: "issue moved to in-progress"},
+				},
+				Completed: []string{"ABC-3"},
+			}
+		},
+		func(string) (domain.IssueRuntimeSnapshot, bool) { return domain.IssueRuntimeSnapshot{}, false },
+		func() {},
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("GET / status = %d, want 200", res.Code)
+	}
+	if contentType := res.Header().Get("Content-Type"); !strings.Contains(contentType, "text/html") {
+		t.Fatalf("Content-Type = %q, want text/html", contentType)
+	}
+	body := res.Body.String()
+	for _, expected := range []string{"Go Harness", "Dispatch blocked", "/repo/WORKFLOW.md", "/repo/.env", "LINEAR_API_KEY", "&lt;redacted&gt;", "GO_HARNESS_LIVE_LINEAR_PROJECT_SLUG", "ABC-1", "ABC-2", "ABC-3", "Recent Activity", "issue_claimed", "tracker_state_transition", "Todo -> In Progress"} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("dashboard body missing %q: %q", expected, body)
+		}
 	}
 }
 

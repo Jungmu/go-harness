@@ -75,6 +75,25 @@ type RecentEvent struct {
 	PayloadSummary string    `json:"payload_summary,omitempty"`
 }
 
+type TimelineEvent struct {
+	At           time.Time `json:"at"`
+	IssueID      string    `json:"issue_id,omitempty"`
+	Identifier   string    `json:"identifier,omitempty"`
+	Attempt      int       `json:"attempt,omitempty"`
+	Event        string    `json:"event"`
+	Status       string    `json:"status,omitempty"`
+	Message      string    `json:"message,omitempty"`
+	Reason       string    `json:"reason,omitempty"`
+	StateBefore  string    `json:"state_before,omitempty"`
+	StateAfter   string    `json:"state_after,omitempty"`
+	SessionID    string    `json:"session_id,omitempty"`
+	ThreadID     string    `json:"thread_id,omitempty"`
+	TurnID       string    `json:"turn_id,omitempty"`
+	WorkspaceKey string    `json:"workspace_key,omitempty"`
+	Workspace    string    `json:"workspace,omitempty"`
+	LastError    string    `json:"last_error,omitempty"`
+}
+
 type RetryEntry struct {
 	IssueID    string    `json:"issue_id"`
 	Identifier string    `json:"identifier"`
@@ -108,13 +127,17 @@ type RunningSnapshot struct {
 }
 
 type StateSnapshot struct {
-	GeneratedAt time.Time           `json:"generated_at"`
-	Counts      SnapshotCounts      `json:"counts"`
-	Running     []RunningSnapshot   `json:"running"`
-	Retrying    []RetryEntry        `json:"retrying"`
-	CodexTotals RuntimeTotals       `json:"codex_totals"`
-	RateLimits  []RateLimitSnapshot `json:"rate_limits"`
-	Completed   []string            `json:"completed,omitempty"`
+	GeneratedAt    time.Time           `json:"generated_at"`
+	Workflow       WorkflowStatus      `json:"workflow"`
+	Environment    EnvironmentStatus   `json:"environment"`
+	Counts         SnapshotCounts      `json:"counts"`
+	Dispatch       DispatchStatus      `json:"dispatch"`
+	Running        []RunningSnapshot   `json:"running"`
+	Retrying       []RetryEntry        `json:"retrying"`
+	RecentActivity []TimelineEvent     `json:"recent_activity,omitempty"`
+	CodexTotals    RuntimeTotals       `json:"codex_totals"`
+	RateLimits     []RateLimitSnapshot `json:"rate_limits"`
+	Completed      []string            `json:"completed,omitempty"`
 }
 
 type IssueRuntimeSnapshot struct {
@@ -123,12 +146,34 @@ type IssueRuntimeSnapshot struct {
 	Status      string           `json:"status"`
 	Running     *RunningSnapshot `json:"running,omitempty"`
 	Retry       *RetryEntry      `json:"retry,omitempty"`
+	History     []TimelineEvent  `json:"history,omitempty"`
 	Completed   bool             `json:"completed,omitempty"`
 }
 
 type SnapshotCounts struct {
 	Running  int `json:"running"`
 	Retrying int `json:"retrying"`
+}
+
+type DispatchStatus struct {
+	Blocked bool   `json:"blocked"`
+	Error   string `json:"error,omitempty"`
+}
+
+type WorkflowStatus struct {
+	Path string `json:"path,omitempty"`
+}
+
+type EnvironmentStatus struct {
+	DotEnvPath    string             `json:"dotenv_path,omitempty"`
+	DotEnvPresent bool               `json:"dotenv_present"`
+	Entries       []EnvironmentEntry `json:"entries,omitempty"`
+}
+
+type EnvironmentEntry struct {
+	Name   string `json:"name"`
+	Value  string `json:"value,omitempty"`
+	Source string `json:"source"`
 }
 
 func NormalizeState(state string) string {

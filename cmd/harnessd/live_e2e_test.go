@@ -34,6 +34,7 @@ type liveE2EProfile struct {
 	ProjectSlug       string
 	ActiveStateID     string
 	ActiveStateName   string
+	HandoffStateName  string
 	TerminalStateID   string
 	TerminalStateName string
 	CodexCommand      string
@@ -84,7 +85,7 @@ func TestPickLiveWorkflowState(t *testing.T) {
 	}
 }
 
-func TestLiveLinearCodexRetryAndCleanup(t *testing.T) {
+func TestLiveLinearCodexHandsOffAtMaxTurns(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping live Linear + Codex E2E in short mode")
 	}
@@ -190,9 +191,6 @@ func TestLiveLinearCodexRetryAndCleanup(t *testing.T) {
 				if !found {
 					return false, "marker file not created yet; issue not present in runtime state", nil
 				}
-				if issueRuntime.Status == "retrying" && issueRuntime.Retry != nil && issueRuntime.Retry.Reason != "max_turns_reached" {
-					return false, "", fmt.Errorf("issue retried before marker creation: reason=%s attempt=%d last_error=%s", issueRuntime.Retry.Reason, issueRuntime.Retry.Attempt, strings.TrimSpace(issueRuntime.Retry.LastError))
-				}
 				if issueRuntime.Status == "completed" {
 					return false, "", fmt.Errorf("issue completed before marker creation")
 				}
@@ -213,71 +211,25 @@ func TestLiveLinearCodexRetryAndCleanup(t *testing.T) {
 		t.Fatalf("waiting for marker file failed: %v", err)
 	}
 
-	var retrySnapshot domain.RetryEntry
 	if err := waitForLiveCondition(testCtx, 250*time.Millisecond, func() (bool, string, error) {
-		snapshot, err := fetchStateSnapshot(statusServer.Client(), statusServer.URL)
-		if err != nil {
-			return false, "", err
-		}
-		for _, entry := range snapshot.Retrying {
-			if entry.Identifier == issue.Identifier {
-				retrySnapshot = entry
-				if entry.Reason != "max_turns_reached" {
-					return false, "retry is present but reason is not max_turns_reached yet", nil
-				}
-				return true, "", nil
-			}
-		}
-		return false, fmt.Sprintf("retry entry for %s not present yet", issue.Identifier), nil
-	}); err != nil {
-		t.Fatalf("waiting for retry snapshot failed: %v", err)
-	}
-
-	issueRuntime, err := fetchIssueSnapshot(statusServer.Client(), statusServer.URL, issue.Identifier)
-	if err != nil {
-		t.Fatalf("fetchIssueSnapshot(retrying) error = %v", err)
-	}
-	if issueRuntime.Status != "retrying" {
-		t.Fatalf("issue runtime status = %q, want retrying", issueRuntime.Status)
-	}
-
-	if err := linearClient.updateIssueState(testCtx, issue.ID, profile.terminalStateID()); err != nil {
-		t.Fatalf("updateIssueState(terminal) error = %v", err)
-	}
-
-	if delay := time.Until(retrySnapshot.DueAt.Add(250 * time.Millisecond)); delay > 0 {
-		select {
-		case <-time.After(delay):
-		case <-testCtx.Done():
-			t.Fatalf("context expired while waiting for retry due time: %v", testCtx.Err())
-		}
-	}
-
-	if err := triggerRefresh(statusServer.Client(), statusServer.URL); err != nil {
-		t.Fatalf("triggerRefresh() error = %v", err)
-	}
-
-	if err := waitForLiveCondition(testCtx, 250*time.Millisecond, func() (bool, string, error) {
-		if err := triggerRefresh(statusServer.Client(), statusServer.URL); err != nil {
-			return false, "", err
-		}
-
 		issueRuntime, err := fetchIssueSnapshot(statusServer.Client(), statusServer.URL, issue.Identifier)
 		if err != nil {
 			return false, "", err
 		}
 		if issueRuntime.Status != "completed" {
-			return false, "issue runtime has not reached completed yet", nil
+			return false, fmt.Sprintf("issue runtime status = %q, want completed", issueRuntime.Status), nil
 		}
 
-		if _, err := os.Stat(markerPath); err == nil {
-			return false, "workspace still exists after terminal cleanup", nil
-		} else if !os.IsNotExist(err) {
+		stateName, err := linearClient.issueStateName(testCtx, issue.ID)
+		if err != nil {
 			return false, "", err
+		}
+		if stateName != profile.HandoffStateName {
+			return false, fmt.Sprintf("linear issue state = %q, want %q", stateName, profile.HandoffStateName), nil
 		}
 		return true, "", nil
 	}); err != nil {
-		t.Fatalf("waiting for completed cleanup failed: %v", err)
+		t.Fatalf("waiting for handoff completion failed: %v", err)
 	}
 }
 
@@ -293,11 +245,15 @@ func loadLiveE2EProfile(t *testing.T) (liveE2EProfile, bool) {
 		TeamID:            strings.TrimSpace(os.Getenv("GO_HARNESS_LIVE_LINEAR_TEAM_ID")),
 		ProjectSlug:       strings.TrimSpace(os.Getenv("GO_HARNESS_LIVE_LINEAR_PROJECT_SLUG")),
 		ActiveStateName:   strings.TrimSpace(os.Getenv("GO_HARNESS_LIVE_LINEAR_ACTIVE_STATE_NAME")),
+		HandoffStateName:  strings.TrimSpace(os.Getenv("GO_HARNESS_LIVE_LINEAR_HANDOFF_STATE_NAME")),
 		TerminalStateName: strings.TrimSpace(os.Getenv("GO_HARNESS_LIVE_LINEAR_TERMINAL_STATE_NAME")),
 		CodexCommand:      strings.TrimSpace(os.Getenv("GO_HARNESS_LIVE_CODEX_COMMAND")),
 	}
 	if profile.CodexCommand == "" {
 		profile.CodexCommand = "codex app-server"
+	}
+	if profile.HandoffStateName == "" {
+		profile.HandoffStateName = "In Review"
 	}
 
 	missing := make([]string, 0, 3)
@@ -344,6 +300,12 @@ func resolveLiveE2EProfile(ctx context.Context, client *liveLinearClient, profil
 	profile.ActiveStateID = active.ID
 	profile.ActiveStateName = active.Name
 
+	handoff, err := pickLiveWorkflowState(states, profile.HandoffStateName, "started", "unstarted", "completed", "canceled")
+	if err != nil {
+		return liveE2EProfile{}, fmt.Errorf("select handoff state: %w", err)
+	}
+	profile.HandoffStateName = handoff.Name
+
 	terminal, err := pickLiveWorkflowState(states, profile.TerminalStateName, "completed", "canceled")
 	if err != nil {
 		return liveE2EProfile{}, fmt.Errorf("select terminal state: %w", err)
@@ -355,13 +317,19 @@ func resolveLiveE2EProfile(ctx context.Context, client *liveLinearClient, profil
 }
 
 func buildLiveWorkflow(profile liveE2EProfile, workspaceRoot string) string {
+	activeStateBlock := fmt.Sprintf("    - %q\n", profile.ActiveStateName)
+	if !strings.EqualFold(strings.TrimSpace(profile.ActiveStateName), "In Progress") {
+		activeStateBlock += `    - "In Progress"
+`
+	}
+
 	return fmt.Sprintf(`---
 tracker:
   kind: linear
   api_key: $LINEAR_API_KEY
   project_slug: %q
   active_states:
-    - %q
+%s
   terminal_states:
     - %q
 
@@ -396,7 +364,7 @@ state={{ issue.state }}
 
 Do not inspect the repository. Do not run git. Do not ask for approval or user input.
 Do not modify any other files. End the turn immediately after the file exists.
-`, profile.ProjectSlug, profile.ActiveStateName, profile.TerminalStateName, workspaceRoot, profile.CodexCommand, liveMarkerFileName)
+`, profile.ProjectSlug, activeStateBlock, profile.TerminalStateName, workspaceRoot, profile.CodexCommand, liveMarkerFileName)
 }
 
 func (p liveE2EProfile) activeStateID() string {
@@ -512,6 +480,33 @@ mutation LiveIssueUpdate($id: String!, $stateId: String) {
 		return fmt.Errorf("issueUpdate did not report success")
 	}
 	return nil
+}
+
+func (c *liveLinearClient) issueStateName(ctx context.Context, issueID string) (string, error) {
+	var payload struct {
+		Issue *struct {
+			State struct {
+				Name string `json:"name"`
+			} `json:"state"`
+		} `json:"issue"`
+	}
+
+	err := c.graphql(ctx, `
+query LiveIssueState($id: String!) {
+  issue(id: $id) {
+    state { name }
+  }
+}
+`, map[string]any{
+		"id": issueID,
+	}, &payload)
+	if err != nil {
+		return "", err
+	}
+	if payload.Issue == nil {
+		return "", fmt.Errorf("issue %q not found", issueID)
+	}
+	return payload.Issue.State.Name, nil
 }
 
 func (c *liveLinearClient) lookupTeamIDByRef(ctx context.Context, ref string) (string, error) {

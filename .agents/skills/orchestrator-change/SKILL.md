@@ -29,7 +29,7 @@ Read these first. Resolve repository documents from the working repository, not 
 ## Invariants
 
 - Only the orchestrator mutates scheduler state.
-- A successful turn does not imply the issue is done.
+- A successful run with no explicit retry stop reason should leave the tracker in a terminal handoff state.
 - Continuation turns reuse the same live app-server process and `thread_id`.
 - Terminal issue transition cancels the run and performs cleanup.
 - Non-active, non-terminal issue transition cancels the run and releases the claim.

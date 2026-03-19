@@ -86,7 +86,7 @@ v1은 local worker only로 제한한다.
 `WORKFLOW.md`, `AGENTS.md`, 검증 스크립트, workspace hooks를 저장소에 둔다.
 
 3. 오케스트레이터는 상태 관리자다.
-이슈 코멘트, PR 링크, 상태 전환 같은 ticket mutation은 가능한 한 agent가 수행한다.
+이슈 코멘트, PR 링크 같은 ticket mutation은 가능한 한 agent가 수행하되, 기본 `In Progress`/`Done` 상태 전환은 harness가 책임진다.
 
 4. DB 없이도 운영 가능해야 한다.
 단일 프로세스, 메모리 상태, 파일 기반 로그, 상태 API만으로 시작한다.
@@ -167,7 +167,7 @@ Codex app-server subprocess 생성, startup handshake, event streaming, continua
 app-server 세션에 주입할 tracker write용 동적 도구를 정의하고, 현재 issue와 현재 project 범위 안에서만 mutation이 일어나게 한다.
 
 8. Observability
-구조화 로그, 상태 스냅샷, HTTP 상태 surface, 최근 이벤트 버퍼, token/rate-limit 집계를 제공한다.
+구조화 로그, 설정 가능한 로그 레벨, 상태 스냅샷, HTTP 상태 surface, 최근 이벤트 버퍼, issue별 timeline history JSONL, token/rate-limit 집계를 제공한다.
 
 ## 9. 제안 디렉터리 구조
 
@@ -388,12 +388,14 @@ claim이 해제되었고 다시 poll 결과에 따라 재판단된다.
 4. Linear에서 candidate issues를 조회한다.
 5. 현재 `claimed`, `running`, `retry` 상태를 고려해 dispatch 대상을 고른다.
 6. issue별 workspace를 준비하고 hook을 실행한다.
-7. Codex app-server session을 시작한다.
-8. 첫 turn에는 전체 rendered prompt를 보낸다.
-9. runner는 이벤트를 스트리밍하고 `LiveSession`, `RecentEvents`, aggregate totals를 갱신한다.
-10. `turn/completed` 후 issue가 active면 같은 thread에서 continuation turn을 시작한다.
-11. issue가 terminal이면 session을 중단하고 workspace를 정리한다.
-12. issue가 non-active non-terminal이면 session만 중단하고 cleanup은 정책에 따라 분리한다.
+7. dispatch 시작 시 issue를 `In Progress`로 전환한다.
+8. Codex app-server session을 시작한다.
+9. 첫 turn에는 전체 rendered prompt를 보낸다.
+10. runner는 이벤트를 스트리밍하고 `LiveSession`, `RecentEvents`, aggregate totals를 갱신한다.
+11. `turn/completed` 후 issue가 active면 같은 thread에서 continuation turn을 시작한다.
+12. run이 성공적으로 끝나고 explicit retry stop reason이 없으면 issue를 `Done`으로 전환한다.
+13. issue가 terminal이면 session을 중단하고 workspace를 정리한다.
+14. issue가 non-active non-terminal이면 session만 중단하고 cleanup은 정책에 따라 분리한다.
 
 ### 11.4 continuation 규칙
 
@@ -401,9 +403,9 @@ claim이 해제되었고 다시 poll 결과에 따라 재판단된다.
 - continuation turn은 새 subprocess를 만들지 않고 기존 app-server 세션을 유지한다.
 - 첫 turn은 전체 task prompt를 사용한다.
 - 이후 turn은 continuation guidance만 보낸다.
-- `turn/completed`는 곧 issue 완료를 뜻하지 않는다.
+- `turn/completed` 자체는 곧 issue 완료를 뜻하지 않지만, run이 정상 종료되고 issue가 여전히 active면 harness가 `Done` 전환을 시도한다.
 - issue가 여전히 active이고 `agent.max_turns` 미만이면 같은 session에서 다음 turn을 시작한다.
-- issue가 active인데 `agent.max_turns`에 도달하면 현재 run을 종료하고 `max_turns_reached` 이유로 retry를 예약한다.
+- issue가 active인데 `agent.max_turns`에 도달하면 현재 run을 종료하고 issue를 `In Review`로 전환한다.
 
 ### 11.5 reconciliation과 cancellation 규칙
 
@@ -422,6 +424,7 @@ workflow file path precedence는 다음과 같다.
 
 1. explicit runtime setting 또는 CLI startup path
 2. 현재 프로세스 working directory의 `WORKFLOW.md`
+3. 실행 파일 디렉터리의 `WORKFLOW.md`
 
 loader 동작은 다음과 같다.
 
@@ -466,6 +469,7 @@ unknown key는 forward compatibility를 위해 무시한다.
   - `$VAR_NAME`이 빈 문자열로 해석되면 missing으로 본다
 - `project_slug`
   - `tracker.kind == "linear"`일 때 dispatch에 필수
+  - Linear project `slugId` 또는 exact project name을 허용한다
 - `active_states`
   - 기본값: `["Todo", "In Progress"]`
 - `terminal_states`
@@ -1159,7 +1163,7 @@ v1의 scheduler state는 intentionally in-memory다.
 - active -> terminal 변경 시 cancellation과 cleanup
 - active -> non-active 변경 시 release
 - continuation turn reuse
-- `max_turns_reached` retry scheduling
+- `max_turns_reached` handoff to `In Review`
 - restart 후 fresh poll recovery
 
 ### 20.4 app-server

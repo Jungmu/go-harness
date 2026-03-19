@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,5 +55,25 @@ func TestManagerPrepareAfterRunAndCleanup(t *testing.T) {
 	}
 	if _, err := os.Stat(workspace.Path); !os.IsNotExist(err) {
 		t.Fatalf("workspace still exists after cleanup: %v", err)
+	}
+}
+
+func TestManagerCleanupRejectsSymlinkWorkspace(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	target := t.TempDir()
+	linkPath := filepath.Join(root, "ABC-1")
+	if err := os.Symlink(target, linkPath); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	manager := NewManager(root, config.HooksConfig{Timeout: time.Second}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	err := manager.Cleanup(context.Background(), domain.Workspace{Path: linkPath, WorkspaceKey: "ABC-1"})
+	if err == nil {
+		t.Fatal("Cleanup() error = nil, want symlink rejection")
+	}
+	if !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("Cleanup() error = %v, want symlink error", err)
 	}
 }

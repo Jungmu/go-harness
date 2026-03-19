@@ -16,10 +16,28 @@ import (
 )
 
 const (
-	defaultPageSize = 50
-	pollQuery       = `
-query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
-  issues(filter: {project: {slugId: {eq: $projectSlug}}, state: {name: {in: $stateNames}}}, first: $first, after: $after) {
+	defaultPageSize           = 50
+	resolveProjectBySlugQuery = `
+query SymphonyLinearProjectBySlug($projectRef: String!) {
+  projects(filter: {slugId: {eq: $projectRef}}, first: 1) {
+    nodes {
+      slugId
+      name
+    }
+  }
+}`
+	resolveProjectByNameQuery = `
+query SymphonyLinearProjectByName($projectRef: String!) {
+  projects(filter: {name: {eq: $projectRef}}, first: 1) {
+    nodes {
+      slugId
+      name
+    }
+  }
+}`
+	pollBySlugQuery = `
+query SymphonyLinearPollBySlug($projectRef: String!, $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
+  issues(filter: {project: {slugId: {eq: $projectRef}}, state: {name: {in: $stateNames}}}, first: $first, after: $after) {
     nodes {
       id
       identifier
@@ -77,6 +95,32 @@ query SymphonyLinearIssuesByID($ids: [ID!]!, $first: Int!, $relationFirst: Int!)
     }
   }
 }`
+	issueTeamQuery = `
+query SymphonyLinearIssueTeam($ids: [ID!]!, $first: Int!) {
+  issues(filter: {id: {in: $ids}}, first: $first) {
+    nodes {
+      id
+      team { id }
+    }
+  }
+}`
+	workflowStatesQuery = `
+query SymphonyLinearWorkflowStates($teamId: ID!) {
+  workflowStates(filter: {team: {id: {eq: $teamId}}}, first: 100) {
+    nodes {
+      id
+      name
+      type
+      position
+    }
+  }
+}`
+	issueUpdateStateQuery = `
+mutation SymphonyLinearIssueUpdateState($id: String!, $stateId: String!) {
+  issueUpdate(id: $id, input: { stateId: $stateId }) {
+    success
+  }
+}`
 )
 
 type Client struct {
@@ -102,6 +146,17 @@ func (c *Client) PollCandidates(ctx context.Context) ([]domain.Issue, error) {
 		return []domain.Issue{}, nil
 	}
 
+	projectSlug, err := c.resolveProjectSlug(ctx, c.cfg.ProjectSlug)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(projectSlug) == "" {
+		return nil, fmt.Errorf("linear project not found for tracker.project_slug=%q", c.cfg.ProjectSlug)
+	}
+	return c.pollCandidatesByProjectRef(ctx, projectSlug)
+}
+
+func (c *Client) pollCandidatesByProjectRef(ctx context.Context, projectSlug string) ([]domain.Issue, error) {
 	var (
 		afterCursor string
 		allIssues   []domain.Issue
@@ -109,9 +164,9 @@ func (c *Client) PollCandidates(ctx context.Context) ([]domain.Issue, error) {
 
 	for {
 		body, err := c.doGraphQL(ctx, graphqlRequest{
-			Query: pollQuery,
+			Query: pollBySlugQuery,
 			Variables: map[string]any{
-				"projectSlug":   c.cfg.ProjectSlug,
+				"projectRef":    projectSlug,
 				"stateNames":    c.cfg.ActiveStates,
 				"first":         defaultPageSize,
 				"relationFirst": defaultPageSize,
@@ -137,6 +192,30 @@ func (c *Client) PollCandidates(ctx context.Context) ([]domain.Issue, error) {
 	return allIssues, nil
 }
 
+func (c *Client) resolveProjectSlug(ctx context.Context, projectRef string) (string, error) {
+	slug, err := c.lookupProjectSlug(ctx, resolveProjectBySlugQuery, projectRef)
+	if err != nil {
+		return "", err
+	}
+	if slug != "" {
+		return slug, nil
+	}
+	return c.lookupProjectSlug(ctx, resolveProjectByNameQuery, projectRef)
+}
+
+func (c *Client) lookupProjectSlug(ctx context.Context, query, projectRef string) (string, error) {
+	body, err := c.doGraphQL(ctx, graphqlRequest{
+		Query: query,
+		Variables: map[string]any{
+			"projectRef": projectRef,
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	return decodeProjectSlug(body)
+}
+
 func (c *Client) FetchByIDs(ctx context.Context, ids []string) ([]domain.Issue, error) {
 	ids = compactStrings(ids)
 	if len(ids) == 0 {
@@ -160,6 +239,46 @@ func (c *Client) FetchByIDs(ctx context.Context, ids []string) ([]domain.Issue, 
 		return nil, err
 	}
 	return issues, nil
+}
+
+func (c *Client) TransitionState(ctx context.Context, issue domain.Issue, targetState string) (domain.Issue, error) {
+	targetState = strings.TrimSpace(targetState)
+	if strings.TrimSpace(issue.ID) == "" {
+		return issue, fmt.Errorf("transition issue state: missing issue id")
+	}
+	if targetState == "" {
+		return issue, fmt.Errorf("transition issue state: missing target state")
+	}
+	if strings.EqualFold(strings.TrimSpace(issue.State), targetState) {
+		issue.State = targetState
+		return issue, nil
+	}
+
+	teamID, err := c.lookupIssueTeamID(ctx, issue.ID)
+	if err != nil {
+		return issue, err
+	}
+	stateID, resolvedName, err := c.lookupWorkflowStateID(ctx, teamID, targetState)
+	if err != nil {
+		return issue, err
+	}
+
+	body, err := c.doGraphQL(ctx, graphqlRequest{
+		Query: issueUpdateStateQuery,
+		Variables: map[string]any{
+			"id":      issue.ID,
+			"stateId": stateID,
+		},
+	})
+	if err != nil {
+		return issue, err
+	}
+	if err := decodeIssueUpdateSuccess(body); err != nil {
+		return issue, err
+	}
+
+	issue.State = resolvedName
+	return issue, nil
 }
 
 func (c *Client) doGraphQL(ctx context.Context, payload graphqlRequest) ([]byte, error) {
@@ -229,6 +348,208 @@ func decodeIssuePage(raw []byte) ([]domain.Issue, issuePageInfo, error) {
 		HasNextPage: payload.Data.Issues.PageInfo.HasNextPage,
 		EndCursor:   payload.Data.Issues.PageInfo.EndCursor,
 	}, nil
+}
+
+func decodeProjectSlug(raw []byte) (string, error) {
+	var payload struct {
+		Data struct {
+			Projects struct {
+				Nodes []struct {
+					SlugID string `json:"slugId"`
+					Name   string `json:"name"`
+				} `json:"nodes"`
+			} `json:"projects"`
+		} `json:"data"`
+		Errors []map[string]any `json:"errors"`
+	}
+
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return "", err
+	}
+	if len(payload.Errors) > 0 {
+		return "", fmt.Errorf("linear graphql errors: %v", payload.Errors)
+	}
+	if len(payload.Data.Projects.Nodes) == 0 {
+		return "", nil
+	}
+	return strings.TrimSpace(payload.Data.Projects.Nodes[0].SlugID), nil
+}
+
+type workflowState struct {
+	ID       string
+	Name     string
+	Type     string
+	Position float64
+}
+
+func (c *Client) lookupIssueTeamID(ctx context.Context, issueID string) (string, error) {
+	body, err := c.doGraphQL(ctx, graphqlRequest{
+		Query: issueTeamQuery,
+		Variables: map[string]any{
+			"ids":   []string{issueID},
+			"first": 1,
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	return decodeIssueTeamID(body, issueID)
+}
+
+func decodeIssueTeamID(raw []byte, issueID string) (string, error) {
+	var payload struct {
+		Data struct {
+			Issues struct {
+				Nodes []struct {
+					ID   string `json:"id"`
+					Team struct {
+						ID string `json:"id"`
+					} `json:"team"`
+				} `json:"nodes"`
+			} `json:"issues"`
+		} `json:"data"`
+		Errors []map[string]any `json:"errors"`
+	}
+
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return "", err
+	}
+	if len(payload.Errors) > 0 {
+		return "", fmt.Errorf("linear graphql errors: %v", payload.Errors)
+	}
+	if len(payload.Data.Issues.Nodes) == 0 || strings.TrimSpace(payload.Data.Issues.Nodes[0].Team.ID) == "" {
+		return "", fmt.Errorf("linear issue team not found for issue_id=%q", issueID)
+	}
+	return strings.TrimSpace(payload.Data.Issues.Nodes[0].Team.ID), nil
+}
+
+func (c *Client) lookupWorkflowStateID(ctx context.Context, teamID, targetState string) (string, string, error) {
+	body, err := c.doGraphQL(ctx, graphqlRequest{
+		Query: workflowStatesQuery,
+		Variables: map[string]any{
+			"teamId": teamID,
+		},
+	})
+	if err != nil {
+		return "", "", err
+	}
+	states, err := decodeWorkflowStates(body)
+	if err != nil {
+		return "", "", err
+	}
+
+	if exact := findWorkflowStateByName(states, targetState); exact != nil {
+		return exact.ID, exact.Name, nil
+	}
+
+	if fallback := c.pickWorkflowStateFallback(states, targetState); fallback != nil {
+		return fallback.ID, fallback.Name, nil
+	}
+
+	return "", "", fmt.Errorf("linear workflow state %q not found for team_id=%q", targetState, teamID)
+}
+
+func decodeWorkflowStates(raw []byte) ([]workflowState, error) {
+	var payload struct {
+		Data struct {
+			WorkflowStates struct {
+				Nodes []struct {
+					ID       string  `json:"id"`
+					Name     string  `json:"name"`
+					Type     string  `json:"type"`
+					Position float64 `json:"position"`
+				} `json:"nodes"`
+			} `json:"workflowStates"`
+		} `json:"data"`
+		Errors []map[string]any `json:"errors"`
+	}
+
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, err
+	}
+	if len(payload.Errors) > 0 {
+		return nil, fmt.Errorf("linear graphql errors: %v", payload.Errors)
+	}
+
+	states := make([]workflowState, 0, len(payload.Data.WorkflowStates.Nodes))
+	for _, state := range payload.Data.WorkflowStates.Nodes {
+		if strings.TrimSpace(state.ID) == "" || strings.TrimSpace(state.Name) == "" {
+			continue
+		}
+		states = append(states, workflowState{
+			ID:       strings.TrimSpace(state.ID),
+			Name:     strings.TrimSpace(state.Name),
+			Type:     strings.TrimSpace(state.Type),
+			Position: state.Position,
+		})
+	}
+	return states, nil
+}
+
+func decodeIssueUpdateSuccess(raw []byte) error {
+	var payload struct {
+		Data struct {
+			IssueUpdate struct {
+				Success bool `json:"success"`
+			} `json:"issueUpdate"`
+		} `json:"data"`
+		Errors []map[string]any `json:"errors"`
+	}
+
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return err
+	}
+	if len(payload.Errors) > 0 {
+		return fmt.Errorf("linear graphql errors: %v", payload.Errors)
+	}
+	if !payload.Data.IssueUpdate.Success {
+		return fmt.Errorf("linear issueUpdate did not report success")
+	}
+	return nil
+}
+
+func findWorkflowStateByName(states []workflowState, target string) *workflowState {
+	for i := range states {
+		if strings.EqualFold(strings.TrimSpace(states[i].Name), target) {
+			return &states[i]
+		}
+	}
+	return nil
+}
+
+func (c *Client) pickWorkflowStateFallback(states []workflowState, target string) *workflowState {
+	switch {
+	case strings.EqualFold(target, "In Progress"):
+		return bestWorkflowState(states, func(state workflowState) bool {
+			if strings.EqualFold(state.Type, "started") {
+				return true
+			}
+			return strings.EqualFold(state.Type, "unstarted") && slices.Contains(c.cfg.ActiveStates, state.Name)
+		})
+	case strings.EqualFold(target, "Done"):
+		return bestWorkflowState(states, func(state workflowState) bool {
+			if strings.EqualFold(state.Type, "completed") {
+				return true
+			}
+			return strings.EqualFold(state.Type, "canceled") && slices.Contains(c.cfg.TerminalStates, state.Name)
+		})
+	default:
+		return nil
+	}
+}
+
+func bestWorkflowState(states []workflowState, keep func(workflowState) bool) *workflowState {
+	var best *workflowState
+	for i := range states {
+		if !keep(states[i]) {
+			continue
+		}
+		candidate := &states[i]
+		if best == nil || candidate.Position < best.Position || (candidate.Position == best.Position && strings.Compare(candidate.Name, best.Name) < 0) {
+			best = candidate
+		}
+	}
+	return best
 }
 
 func normalizeIssue(raw map[string]any) domain.Issue {

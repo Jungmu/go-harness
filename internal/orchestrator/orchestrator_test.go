@@ -17,19 +17,28 @@ import (
 	"go-harness/internal/workflow"
 )
 
-func TestOrchestratorSchedulesRetryAfterSuccessfulActiveRun(t *testing.T) {
+func TestOrchestratorMovesIssueToInProgressThenDone(t *testing.T) {
 	cfg := loadTestConfig(t)
-	issue := domain.Issue{ID: "1", Identifier: "ABC-1", Title: "Example", State: "In Progress"}
+	issue := domain.Issue{ID: "1", Identifier: "ABC-1", Title: "Example", State: "Todo"}
 
+	var transitions []string
 	tracker := &fakeTracker{
 		pollCandidates: func() []domain.Issue { return []domain.Issue{issue} },
 		fetchByIDs: func(_ []string) []domain.Issue {
 			return []domain.Issue{issue}
 		},
+		transitionState: func(issue domain.Issue, stateName string) (domain.Issue, error) {
+			transitions = append(transitions, stateName)
+			issue.State = stateName
+			return issue, nil
+		},
 	}
 	workspaceManager := &fakeWorkspaceManager{root: cfg.Workspace.Root}
 	runner := &fakeRunner{
 		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
+			if issue.State != "In Progress" {
+				t.Fatalf("runner issue state = %q, want In Progress", issue.State)
+			}
 			onEvent(codex.Event{Type: "session_started", At: time.Now().UTC(), SessionID: "thread-1-turn-1", ThreadID: "thread-1", TurnID: "turn-1"})
 			onEvent(codex.Event{Type: "turn_completed", At: time.Now().UTC(), Usage: domain.RuntimeTotals{InputTokens: 1, OutputTokens: 2, TotalTokens: 3}})
 			return codex.RunResult{
@@ -52,12 +61,34 @@ func TestOrchestratorSchedulesRetryAfterSuccessfulActiveRun(t *testing.T) {
 
 	waitFor(t, func() bool {
 		snapshot := orch.Snapshot()
-		return snapshot.Counts.Retrying == 1
+		return len(snapshot.Completed) == 1
 	})
 
 	snapshot := orch.Snapshot()
-	if snapshot.Retrying[0].Reason != "active_still_open" {
-		t.Fatalf("retry reason = %q, want active_still_open", snapshot.Retrying[0].Reason)
+	if snapshot.Counts.Retrying != 0 {
+		t.Fatalf("retrying = %d, want 0", snapshot.Counts.Retrying)
+	}
+	if snapshot.Completed[0] != "ABC-1" {
+		t.Fatalf("completed = %#v, want ABC-1", snapshot.Completed)
+	}
+	if len(transitions) != 2 || transitions[0] != "In Progress" || transitions[1] != "Done" {
+		t.Fatalf("transitions = %#v, want [In Progress Done]", transitions)
+	}
+	if !containsTimelineEvent(snapshot.RecentActivity, "ABC-1", "issue_claimed") {
+		t.Fatalf("recent activity missing issue_claimed: %#v", snapshot.RecentActivity)
+	}
+	if !containsTimelineEvent(snapshot.RecentActivity, "ABC-1", "issue_completed") {
+		t.Fatalf("recent activity missing issue_completed: %#v", snapshot.RecentActivity)
+	}
+	historyPath := filepath.Join(cfg.Workspace.Root, ".harness-history", "ABC-1.jsonl")
+	data, err := os.ReadFile(historyPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", historyPath, err)
+	}
+	for _, expected := range []string{"issue_claimed", "workspace_prepared", "tracker_state_transition", "issue_completed"} {
+		if !strings.Contains(string(data), expected) {
+			t.Fatalf("history file missing %q: %s", expected, string(data))
+		}
 	}
 }
 
@@ -71,6 +102,10 @@ func TestOrchestratorCancelsTerminalIssueAndCleansWorkspace(t *testing.T) {
 		pollCandidates: func() []domain.Issue { return []domain.Issue{active} },
 		fetchByIDs: func(_ []string) []domain.Issue {
 			return []domain.Issue{terminal}
+		},
+		transitionState: func(issue domain.Issue, stateName string) (domain.Issue, error) {
+			issue.State = stateName
+			return issue, nil
 		},
 	}
 	workspaceManager := &fakeWorkspaceManager{root: cfg.Workspace.Root}
@@ -101,14 +136,20 @@ func TestOrchestratorCancelsTerminalIssueAndCleansWorkspace(t *testing.T) {
 	})
 }
 
-func TestOrchestratorRetriesWhenMaxTurnsReached(t *testing.T) {
+func TestOrchestratorHandsOffIssueToInReviewWhenMaxTurnsReached(t *testing.T) {
 	cfg := loadTestConfig(t)
 	issue := domain.Issue{ID: "1", Identifier: "ABC-1", Title: "Example", State: "In Progress"}
 
+	var transitions []string
 	tracker := &fakeTracker{
 		pollCandidates: func() []domain.Issue { return []domain.Issue{issue} },
 		fetchByIDs: func(_ []string) []domain.Issue {
 			return []domain.Issue{issue}
+		},
+		transitionState: func(issue domain.Issue, stateName string) (domain.Issue, error) {
+			transitions = append(transitions, stateName)
+			issue.State = stateName
+			return issue, nil
 		},
 	}
 	workspaceManager := &fakeWorkspaceManager{root: cfg.Workspace.Root}
@@ -135,12 +176,70 @@ func TestOrchestratorRetriesWhenMaxTurnsReached(t *testing.T) {
 
 	waitFor(t, func() bool {
 		snapshot := orch.Snapshot()
-		return snapshot.Counts.Retrying == 1
+		return len(snapshot.Completed) == 1
 	})
 
 	snapshot := orch.Snapshot()
-	if snapshot.Retrying[0].Reason != "max_turns_reached" {
-		t.Fatalf("retry reason = %q, want max_turns_reached", snapshot.Retrying[0].Reason)
+	if snapshot.Counts.Retrying != 0 {
+		t.Fatalf("retrying = %d, want 0", snapshot.Counts.Retrying)
+	}
+	if snapshot.Completed[0] != "ABC-1" {
+		t.Fatalf("completed = %#v, want ABC-1", snapshot.Completed)
+	}
+	if len(transitions) != 1 || transitions[0] != "In Review" {
+		t.Fatalf("transitions = %#v, want [In Review]", transitions)
+	}
+	if !containsTimelineEvent(snapshot.RecentActivity, "ABC-1", "issue_completed") {
+		t.Fatalf("recent activity missing issue_completed: %#v", snapshot.RecentActivity)
+	}
+}
+
+func TestApplyWorkerExitPrefersSuccessfulHandoffOverNonActiveStopReason(t *testing.T) {
+	cfg := loadTestConfig(t)
+	orch := New(cfg, &fakeTracker{}, &fakeWorkspaceManager{root: cfg.Workspace.Root}, &fakeRunner{}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+
+	issue := domain.Issue{ID: "1", Identifier: "ABC-1", Title: "Example", State: "In Progress"}
+	workspace := domain.Workspace{WorkspaceKey: "ABC-1", Path: filepath.Join(cfg.Workspace.Root, "ABC-1")}
+	st := &state{
+		running: map[string]*runningTask{
+			issue.ID: {
+				issue:      issue,
+				attempt:    1,
+				workspace:  workspace,
+				startedAt:  time.Now().UTC(),
+				stopReason: "non_active_state",
+			},
+		},
+		claimed:    map[string]struct{}{issue.ID: {}},
+		retryQueue: map[string]domain.RetryEntry{},
+		completed:  map[string]struct{}{},
+		history:    map[string][]domain.TimelineEvent{},
+		rateLimits: map[string]domain.RateLimitSnapshot{},
+	}
+
+	handoff := issue
+	handoff.State = "In Review"
+	orch.applyWorkerExit(context.Background(), st, workerExit{
+		Issue:     issue,
+		Attempt:   1,
+		Workspace: workspace,
+		Result: codex.RunResult{
+			Session: domain.LiveSession{SessionID: "thread-1-turn-1", ThreadID: "thread-1", TurnID: "turn-1"},
+		},
+		Refreshed: &handoff,
+	})
+
+	if _, ok := st.completed[handoff.Identifier]; !ok {
+		t.Fatalf("completed missing %q after successful handoff", handoff.Identifier)
+	}
+	if _, ok := st.claimed[issue.ID]; ok {
+		t.Fatalf("claimed still contains %q after successful handoff", issue.ID)
+	}
+	if containsTimelineEvent(st.recentActivity, handoff.Identifier, "issue_released") {
+		t.Fatalf("recent activity unexpectedly contains issue_released: %#v", st.recentActivity)
+	}
+	if !containsTimelineEvent(st.recentActivity, handoff.Identifier, "issue_completed") {
+		t.Fatalf("recent activity missing issue_completed: %#v", st.recentActivity)
 	}
 }
 
@@ -161,6 +260,10 @@ func TestOrchestratorContinuationStopsWithoutRetryWhenIssueTurnsTerminal(t *test
 				return []domain.Issue{active}
 			}
 			return []domain.Issue{terminal}
+		},
+		transitionState: func(issue domain.Issue, stateName string) (domain.Issue, error) {
+			issue.State = stateName
+			return issue, nil
 		},
 	}
 	workspaceManager := &fakeWorkspaceManager{root: cfg.Workspace.Root}
@@ -232,8 +335,9 @@ func TestOrchestratorContinuationStopsWithoutRetryWhenIssueTurnsTerminal(t *test
 }
 
 type fakeTracker struct {
-	pollCandidates func() []domain.Issue
-	fetchByIDs     func([]string) []domain.Issue
+	pollCandidates  func() []domain.Issue
+	fetchByIDs      func([]string) []domain.Issue
+	transitionState func(domain.Issue, string) (domain.Issue, error)
 }
 
 func (f *fakeTracker) PollCandidates(_ context.Context) ([]domain.Issue, error) {
@@ -242,6 +346,14 @@ func (f *fakeTracker) PollCandidates(_ context.Context) ([]domain.Issue, error) 
 
 func (f *fakeTracker) FetchByIDs(_ context.Context, ids []string) ([]domain.Issue, error) {
 	return f.fetchByIDs(ids), nil
+}
+
+func (f *fakeTracker) TransitionState(_ context.Context, issue domain.Issue, stateName string) (domain.Issue, error) {
+	if f.transitionState == nil {
+		issue.State = stateName
+		return issue, nil
+	}
+	return f.transitionState(issue, stateName)
 }
 
 type fakeWorkspaceManager struct {
@@ -328,4 +440,13 @@ func waitFor(t *testing.T, fn func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("condition was not satisfied before timeout")
+}
+
+func containsTimelineEvent(events []domain.TimelineEvent, identifier, eventType string) bool {
+	for _, event := range events {
+		if event.Identifier == identifier && event.Event == eventType {
+			return true
+		}
+	}
+	return false
 }

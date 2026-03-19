@@ -29,7 +29,7 @@ Important boundary:
 - Symphony is a scheduler/runner and tracker reader.
 - Ticket writes (state transitions, comments, PR links) are typically performed by the coding agent
   using tools available in the workflow/runtime environment.
-- A successful run may end at a workflow-defined handoff state (for example `Human Review`), not
+- A successful run may end at a workflow-defined handoff state (for example `In Review`), not
   necessarily `Done`.
 
 ## 2. Goals and Non-Goals
@@ -285,6 +285,7 @@ Workflow file path precedence:
 
 1. Explicit application/runtime setting (set by CLI startup path).
 2. Default: `WORKFLOW.md` in the current process working directory.
+3. Fallback: `WORKFLOW.md` in the executable directory.
 
 Loader behavior:
 
@@ -616,12 +617,14 @@ Important nuance:
 - After each normal turn completion, the worker re-checks the tracker issue state.
 - If the issue is still in an active state, the worker should start another turn on the same live
   coding-agent thread in the same workspace, up to `agent.max_turns`.
+- If the issue is still active when the worker reaches `agent.max_turns`, the orchestrator may
+  transition the issue to a non-active handoff state (for example `In Review`) and stop retrying.
 - The first turn should use the full rendered task prompt.
 - Continuation turns should send only continuation guidance to the existing thread, not resend the
   original task prompt that is already present in thread history.
-- Once the worker exits normally, the orchestrator still schedules a short continuation retry
-  (about 1 second) so it can re-check whether the issue remains active and needs another worker
-  session.
+- Once the worker exits normally and the issue still remains active without a handoff transition,
+  the orchestrator still schedules a short continuation retry (about 1 second) so it can re-check
+  whether the issue remains active and needs another worker session.
 
 ### 7.2 Run Attempt Lifecycle
 
@@ -652,8 +655,8 @@ Distinct terminal reasons are important because retry logic and logs differ.
 - `Worker Exit (normal)`
   - Remove running entry.
   - Update aggregate runtime totals.
-  - Schedule continuation retry (attempt `1`) after the worker exhausts or finishes its in-process
-    turn loop.
+  - If the issue still remains active without a handoff transition, schedule continuation retry
+    (attempt `1`) after the worker exhausts or finishes its in-process turn loop.
 
 - `Worker Exit (abnormal)`
   - Remove running entry.
@@ -748,7 +751,8 @@ Retry entry creation:
 
 Backoff formula:
 
-- Normal continuation retries after a clean worker exit use a short fixed delay of `1000` ms.
+- Normal continuation retries after a clean worker exit that leaves the issue active use a short
+  fixed delay of `1000` ms.
 - Failure-driven retries use `delay = min(10000 * 2^(attempt - 1), agent.max_retry_backoff_ms)`.
 - Power is capped by the configured max retry backoff (default `300000` / 5m).
 
@@ -1225,7 +1229,7 @@ Symphony does not require first-class tracker write APIs in the orchestrator.
   agent using tools defined by the workflow prompt.
 - The service remains a scheduler/runner and tracker reader.
 - Workflow-specific success often means "reached the next handoff state" (for example
-  `Human Review`) rather than tracker terminal state `Done`.
+  `In Review`) rather than tracker terminal state `Done`.
 - If the optional `linear_graphql` client-side tool extension is implemented, it is still part of
   the agent toolchain rather than orchestrator business logic.
 
@@ -1864,6 +1868,7 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
       break
 
     if turn_number >= max_turns:
+      issue = tracker.transition_issue_state(issue, "In Review")
       break
 
     turn_number = turn_number + 1
@@ -1945,6 +1950,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Workflow file path precedence:
   - explicit runtime path is used when provided
   - cwd default is `WORKFLOW.md` when no explicit runtime path is provided
+  - executable-directory `WORKFLOW.md` is used when the cwd default is absent
 - Workflow file changes are detected and trigger re-read/re-apply without restart
 - `.env` changes in the executable directory also trigger config re-read/re-apply without restart
 - Invalid workflow reload keeps last known good effective configuration and emits an
@@ -2001,7 +2007,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Non-active state stops running agent without workspace cleanup
 - Terminal state stops running agent and cleans workspace
 - Reconciliation with no running issues is a no-op
-- Normal worker exit schedules a short continuation retry (attempt 1)
+- Normal worker exit schedules a short continuation retry (attempt 1) only when the issue remains
+  active without a handoff transition
 - Abnormal worker exit increments retries with 10s-based exponential backoff
 - Retry backoff cap uses configured `agent.max_retry_backoff_ms`
 - Retry queue entries include attempt, due time, identifier, and error
@@ -2055,7 +2062,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 - CLI accepts an optional positional workflow path argument (`path-to-WORKFLOW.md`)
 - CLI uses `./WORKFLOW.md` when no workflow path argument is provided
-- CLI errors on nonexistent explicit workflow path or missing default `./WORKFLOW.md`
+- CLI falls back to `WORKFLOW.md` next to the executable when `./WORKFLOW.md` is absent
+- CLI errors on nonexistent explicit workflow path or when neither default location exists
 - CLI surfaces startup failure cleanly
 - CLI exits with success when application starts and shuts down normally
 - CLI exits nonzero when startup fails or the host process exits abnormally

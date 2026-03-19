@@ -67,6 +67,76 @@ func withExecutableDotEnv(t *testing.T, content string) string {
 	return path
 }
 
+func withExecutableWorkflow(t *testing.T, content string) string {
+	t.Helper()
+
+	executablePath, err := os.Executable()
+	if err != nil {
+		t.Fatalf("Executable() error = %v", err)
+	}
+	path := filepath.Join(filepath.Dir(executablePath), "WORKFLOW.md")
+
+	original, readErr := os.ReadFile(path)
+	existed := readErr == nil
+	if readErr != nil && !os.IsNotExist(readErr) {
+		t.Fatalf("ReadFile(%q) error = %v", path, readErr)
+	}
+
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", path, err)
+	}
+
+	t.Cleanup(func() {
+		var err error
+		if existed {
+			err = os.WriteFile(path, original, 0o644)
+		} else {
+			err = os.Remove(path)
+			if os.IsNotExist(err) {
+				err = nil
+			}
+		}
+		if err != nil {
+			t.Fatalf("restore %q error = %v", path, err)
+		}
+	})
+
+	return path
+}
+
+func withWorkingDir(t *testing.T, dir string) {
+	t.Helper()
+
+	original, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("Chdir(%q) error = %v", dir, err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(original); err != nil {
+			t.Fatalf("restore cwd error = %v", err)
+		}
+	})
+}
+
+func assertSameFile(t *testing.T, gotPath, wantPath string) {
+	t.Helper()
+
+	gotInfo, err := os.Stat(gotPath)
+	if err != nil {
+		t.Fatalf("Stat(%q) error = %v", gotPath, err)
+	}
+	wantInfo, err := os.Stat(wantPath)
+	if err != nil {
+		t.Fatalf("Stat(%q) error = %v", wantPath, err)
+	}
+	if !os.SameFile(gotInfo, wantInfo) {
+		t.Fatalf("paths do not reference the same file: got %q want %q", gotPath, wantPath)
+	}
+}
+
 func TestStoreLoadAndValidateAppliesDefaultsAndEnvResolution(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("LINEAR_API_KEY", "linear-token")
@@ -101,6 +171,9 @@ Handle {{ issue.identifier }}
 	if cfg.Polling.Interval != defaultPollingInterval {
 		t.Fatalf("Polling.Interval = %v", cfg.Polling.Interval)
 	}
+	if cfg.Logging.Level != defaultLogLevel {
+		t.Fatalf("Logging.Level = %q, want %q", cfg.Logging.Level, defaultLogLevel)
+	}
 	if cfg.Workspace.Root != filepath.Clean(filepath.Join(root, "workspaces")) {
 		t.Fatalf("Workspace.Root = %q", cfg.Workspace.Root)
 	}
@@ -116,6 +189,7 @@ func TestStoreLoadAndValidateReadsDotEnvFromExecutableDirectory(t *testing.T) {
 	root := t.TempDir()
 	withUnsetEnv(t, "LINEAR_API_KEY")
 	withUnsetEnv(t, "WORKSPACE_ROOT")
+	withUnsetEnv(t, "PROJECT_SLUG")
 	withExecutableDotEnv(t, "LINEAR_API_KEY=dotenv-token\nWORKSPACE_ROOT="+filepath.Join(root, "dotenv-workspaces")+"\n")
 
 	path := filepath.Join(root, "WORKFLOW.md")
@@ -143,6 +217,15 @@ Handle {{ issue.identifier }}
 	}
 	if cfg.Workspace.Root != filepath.Join(root, "dotenv-workspaces") {
 		t.Fatalf("Workspace.Root = %q, want %q", cfg.Workspace.Root, filepath.Join(root, "dotenv-workspaces"))
+	}
+	if !cfg.Environment.DotEnvPresent {
+		t.Fatal("Environment.DotEnvPresent = false, want true")
+	}
+	if cfg.Environment.DotEnvPath == "" {
+		t.Fatal("Environment.DotEnvPath = empty, want executable .env path")
+	}
+	if len(cfg.Environment.Entries) != 2 {
+		t.Fatalf("Environment.Entries = %#v, want 2 tracked entries", cfg.Environment.Entries)
 	}
 }
 
@@ -178,6 +261,80 @@ Handle {{ issue.identifier }}
 	if cfg.Workspace.Root != filepath.Join(root, "process-workspaces") {
 		t.Fatalf("Workspace.Root = %q, want %q", cfg.Workspace.Root, filepath.Join(root, "process-workspaces"))
 	}
+	if cfg.Environment.Entries[0].Name != "LINEAR_API_KEY" || cfg.Environment.Entries[0].Source != "process" || cfg.Environment.Entries[0].Value != "<redacted>" {
+		t.Fatalf("Environment entry for LINEAR_API_KEY = %#v", cfg.Environment.Entries[0])
+	}
+	if cfg.Environment.Entries[1].Name != "WORKSPACE_ROOT" || cfg.Environment.Entries[1].Source != "process" || cfg.Environment.Entries[1].Value != filepath.Join(root, "process-workspaces") {
+		t.Fatalf("Environment entry for WORKSPACE_ROOT = %#v", cfg.Environment.Entries[1])
+	}
+}
+
+func TestStoreLoadAndValidateTracksDotEnvEntriesWithRedaction(t *testing.T) {
+	root := t.TempDir()
+	withUnsetEnv(t, "LINEAR_API_KEY")
+	withUnsetEnv(t, "WORKSPACE_ROOT")
+	withExecutableDotEnv(t, "LINEAR_API_KEY=dotenv-token\nWORKSPACE_ROOT="+filepath.Join(root, "dotenv-workspaces")+"\nUNUSED_FLAG=1\n")
+
+	path := filepath.Join(root, "WORKFLOW.md")
+	content := `---
+tracker:
+  kind: linear
+  api_key: $LINEAR_API_KEY
+  project_slug: TEST
+workspace:
+  root: $WORKSPACE_ROOT
+---
+Handle {{ issue.identifier }}
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := NewStore(workflow.NewLoader()).LoadAndValidate(path)
+	if err != nil {
+		t.Fatalf("LoadAndValidate() error = %v", err)
+	}
+
+	if len(cfg.Environment.Entries) != 3 {
+		t.Fatalf("Environment.Entries = %#v, want 3 entries including unused .env key", cfg.Environment.Entries)
+	}
+	if cfg.Environment.Entries[0].Name != "LINEAR_API_KEY" || cfg.Environment.Entries[0].Value != "<redacted>" || cfg.Environment.Entries[0].Source != ".env" {
+		t.Fatalf("LINEAR_API_KEY entry = %#v", cfg.Environment.Entries[0])
+	}
+	if cfg.Environment.Entries[1].Name != "UNUSED_FLAG" || cfg.Environment.Entries[1].Value != "1" || cfg.Environment.Entries[1].Source != ".env" {
+		t.Fatalf("UNUSED_FLAG entry = %#v", cfg.Environment.Entries[1])
+	}
+	if cfg.Environment.Entries[2].Name != "WORKSPACE_ROOT" || cfg.Environment.Entries[2].Value != filepath.Join(root, "dotenv-workspaces") || cfg.Environment.Entries[2].Source != ".env" {
+		t.Fatalf("WORKSPACE_ROOT entry = %#v", cfg.Environment.Entries[2])
+	}
+}
+
+func TestStoreLoadAndValidateResolvesProjectSlugFromEnv(t *testing.T) {
+	root := t.TempDir()
+	withUnsetEnv(t, "LINEAR_API_KEY")
+	withUnsetEnv(t, "PROJECT_SLUG")
+	withExecutableDotEnv(t, "LINEAR_API_KEY=dotenv-token\nPROJECT_SLUG=improve-harness\n")
+
+	path := filepath.Join(root, "WORKFLOW.md")
+	content := `---
+tracker:
+  kind: linear
+  api_key: $LINEAR_API_KEY
+  project_slug: $PROJECT_SLUG
+---
+Handle {{ issue.identifier }}
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := NewStore(workflow.NewLoader()).LoadAndValidate(path)
+	if err != nil {
+		t.Fatalf("LoadAndValidate() error = %v", err)
+	}
+	if cfg.Tracker.ProjectSlug != "improve-harness" {
+		t.Fatalf("Tracker.ProjectSlug = %q, want improve-harness", cfg.Tracker.ProjectSlug)
+	}
 }
 
 func TestStoreLoadAndValidateRejectsMissingProjectSlug(t *testing.T) {
@@ -207,6 +364,98 @@ Prompt
 	}
 	if validationErr.Field != "tracker.project_slug" {
 		t.Fatalf("ValidationError.Field = %q, want tracker.project_slug", validationErr.Field)
+	}
+}
+
+func TestStoreLoadAndValidateRejectsInvalidLoggingLevel(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("LINEAR_API_KEY", "linear-token")
+
+	path := filepath.Join(root, "WORKFLOW.md")
+	content := `---
+tracker:
+  kind: linear
+  api_key: $LINEAR_API_KEY
+  project_slug: TEST
+logging:
+  level: verbose
+---
+Prompt
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := NewStore(workflow.NewLoader()).LoadAndValidate(path)
+	if err == nil {
+		t.Fatal("LoadAndValidate() error = nil, want error")
+	}
+
+	var validationErr *ValidationError
+	if !errors.As(err, &validationErr) {
+		t.Fatalf("error type = %T, want *ValidationError", err)
+	}
+	if validationErr.Field != "logging.level" {
+		t.Fatalf("ValidationError.Field = %q, want logging.level", validationErr.Field)
+	}
+}
+
+func TestStoreLoadAndValidateUsesExecutableWorkflowWhenCWDDefaultIsMissing(t *testing.T) {
+	root := t.TempDir()
+	withWorkingDir(t, root)
+
+	workflowPath := withExecutableWorkflow(t, `---
+tracker:
+  kind: linear
+  api_key: executable-token
+  project_slug: EXECUTABLE
+---
+Prompt
+`)
+
+	cfg, err := NewStore(workflow.NewLoader()).LoadAndValidate("")
+	if err != nil {
+		t.Fatalf("LoadAndValidate() error = %v", err)
+	}
+
+	assertSameFile(t, cfg.SourcePath, workflowPath)
+	if cfg.Tracker.ProjectSlug != "EXECUTABLE" {
+		t.Fatalf("ProjectSlug = %q, want EXECUTABLE", cfg.Tracker.ProjectSlug)
+	}
+}
+
+func TestStoreLoadAndValidatePrefersCWDWorkflowOverExecutableWorkflow(t *testing.T) {
+	root := t.TempDir()
+	withWorkingDir(t, root)
+	withExecutableWorkflow(t, `---
+tracker:
+  kind: linear
+  api_key: executable-token
+  project_slug: EXECUTABLE
+---
+Executable prompt
+`)
+
+	cwdWorkflowPath := filepath.Join(root, "WORKFLOW.md")
+	if err := os.WriteFile(cwdWorkflowPath, []byte(`---
+tracker:
+  kind: linear
+  api_key: cwd-token
+  project_slug: CWD
+---
+Cwd prompt
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := NewStore(workflow.NewLoader()).LoadAndValidate("")
+	if err != nil {
+		t.Fatalf("LoadAndValidate() error = %v", err)
+	}
+
+	assertSameFile(t, cfg.SourcePath, cwdWorkflowPath)
+	if cfg.Tracker.ProjectSlug != "CWD" {
+		t.Fatalf("ProjectSlug = %q, want CWD", cfg.Tracker.ProjectSlug)
 	}
 }
 
@@ -269,6 +518,8 @@ tracker:
   project_slug: TEST2
 polling:
   interval_ms: 50
+logging:
+  level: debug
 ---
 Prompt v2
 `
@@ -288,6 +539,9 @@ Prompt v2
 	}
 	if reloaded.Polling.Interval != 50*time.Millisecond {
 		t.Fatalf("Polling.Interval = %v, want 50ms", reloaded.Polling.Interval)
+	}
+	if reloaded.Logging.Level != "debug" {
+		t.Fatalf("Logging.Level = %q, want debug", reloaded.Logging.Level)
 	}
 	if store.DispatchValidationError() != nil {
 		t.Fatalf("DispatchValidationError() = %v, want nil after valid reload", store.DispatchValidationError())

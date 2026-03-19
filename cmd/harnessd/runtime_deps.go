@@ -27,6 +27,11 @@ func (d *dynamicTracker) FetchByIDs(ctx context.Context, ids []string) ([]domain
 	return linear.NewClient(d.httpClient, cfg.Tracker).FetchByIDs(ctx, ids)
 }
 
+func (d *dynamicTracker) TransitionState(ctx context.Context, issue domain.Issue, stateName string) (domain.Issue, error) {
+	cfg := d.store.Current()
+	return linear.NewClient(d.httpClient, cfg.Tracker).TransitionState(ctx, issue, stateName)
+}
+
 type dynamicWorkspaceManager struct {
 	store  *config.Store
 	logger *slog.Logger

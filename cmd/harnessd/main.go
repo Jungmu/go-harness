@@ -35,7 +35,7 @@ func run(args []string, stdout io.Writer, httpClient *http.Client) int {
 func runDaemon(args []string) int {
 	var port int
 	flags := flag.NewFlagSet("harnessd", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
+	flags.SetOutput(os.Stderr)
 	flags.IntVar(&port, "port", 0, "override the HTTP status server port")
 	if err := flags.Parse(args); err != nil {
 		return 2
@@ -46,14 +46,17 @@ func runDaemon(args []string) int {
 		workflowPath = positional[0]
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-
 	store := config.NewStore(workflow.NewLoader())
 	cfg, err := store.LoadAndValidate(workflowPath)
 	if err != nil {
+		logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 		logger.Error("failed to load configuration", slog.Any("error", err))
 		return 1
 	}
+
+	var levelVar slog.LevelVar
+	levelVar.Set(parseLogLevel(cfg.Logging.Level))
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: &levelVar}))
 
 	if port > 0 {
 		cfg.Server.Port = port
@@ -62,7 +65,8 @@ func runDaemon(args []string) int {
 	trackerClient := &dynamicTracker{store: store, httpClient: http.DefaultClient}
 	workspaceManager := &dynamicWorkspaceManager{store: store, logger: logger}
 	runner := &dynamicRunner{store: store, logger: logger}
-	orch := orchestrator.New(cfg, trackerClient, workspaceManager, runner, logger, orchestrator.WithConfigSource(store))
+	configSource := &loggingConfigSource{store: store, levelVar: &levelVar}
+	orch := orchestrator.New(cfg, trackerClient, workspaceManager, runner, logger, orchestrator.WithConfigSource(configSource))
 
 	rootCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignals()
@@ -71,6 +75,15 @@ func runDaemon(args []string) int {
 		logger.Error("failed to start orchestrator", slog.Any("error", err))
 		return 1
 	}
+
+	logger.Info("harness daemon started",
+		slog.String("workflow_path", cfg.SourcePath),
+		slog.String("log_level", cfg.Logging.Level),
+		slog.Duration("poll_interval", cfg.Polling.Interval),
+		slog.String("workspace_root", cfg.Workspace.Root),
+		slog.Int("server_port", cfg.Server.Port),
+	)
+	logStartupConfiguration(logger, cfg)
 
 	var httpServer *http.Server
 	if cfg.Server.Port > 0 {
@@ -84,9 +97,11 @@ func runDaemon(args []string) int {
 				logger.Error("http server exited", slog.Any("error", err))
 			}
 		}()
+		logger.Info("http status server listening", slog.String("addr", httpServer.Addr))
 	}
 
 	<-rootCtx.Done()
+	logger.Info("shutting down harness daemon")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -107,7 +122,7 @@ func runDaemon(args []string) int {
 
 func runStatus(args []string, stdout io.Writer, httpClient *http.Client) int {
 	flags := flag.NewFlagSet("harnessd status", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
+	flags.SetOutput(os.Stderr)
 
 	var addr string
 	flags.StringVar(&addr, "addr", "http://127.0.0.1:8080", "base address of the running harness daemon")
@@ -145,4 +160,25 @@ func runStatus(args []string, stdout io.Writer, httpClient *http.Client) int {
 	}
 	_, _ = fmt.Fprintln(stdout, string(encoded))
 	return 0
+}
+
+func logStartupConfiguration(logger *slog.Logger, cfg config.RuntimeConfig) {
+	entries := make([]map[string]string, 0, len(cfg.Environment.Entries))
+	for _, entry := range cfg.Environment.Entries {
+		item := map[string]string{
+			"name":   entry.Name,
+			"source": entry.Source,
+		}
+		if entry.Value != "" {
+			item["value"] = entry.Value
+		}
+		entries = append(entries, item)
+	}
+
+	logger.Info("resolved startup environment",
+		slog.String("workflow_path", cfg.SourcePath),
+		slog.String("dotenv_path", cfg.Environment.DotEnvPath),
+		slog.Bool("dotenv_present", cfg.Environment.DotEnvPresent),
+		slog.Any("environment_entries", entries),
+	)
 }

@@ -42,6 +42,9 @@ codex:
   read_timeout_ms: 5000
   stall_timeout_ms: 300000
 
+logging:
+  level: info
+
 server:
   port: 8080
 ---
