@@ -5,6 +5,8 @@
 
 # Local runtime artifacts
 transcript.log
+.harness/
+.cache/
 
 # Go build and test outputs
 bin/

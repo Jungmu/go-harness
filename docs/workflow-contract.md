@@ -147,7 +147,7 @@ Unknown variables and filters return `workflow_template_render_error`.
 - The continuation prompt includes the issue identifier, refreshed tracker state, and the next turn count.
 - If the refreshed issue is still active and the current turn count has reached `agent.max_turns`, the run stops and the orchestrator transitions the issue to `In Review`.
 - Before the runtime transitions an issue to `Done`, it pushes the current workspace `HEAD` to the issue branch and creates or reuses a GitHub pull request.
-- GitHub PR creation requires a clean git worktree other than `.harness/*` review artifacts.
+- GitHub PR creation requires a clean git worktree other than `.harness/*` runtime artifacts such as review files, tool caches, and scratch output.
 - If GitHub PR creation fails, the attempt follows the normal retry path and the issue does not move to `Done`.
 - If `.harness/review-notes.md` exists in a coding workspace, the runtime appends an internal prompt suffix telling the coding lane to read it first.
 - Review turns do not transition the issue to `In Progress`; they keep the issue in `In Review` until the verdict transitions it to `Done` or `Todo`.

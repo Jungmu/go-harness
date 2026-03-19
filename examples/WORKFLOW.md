@@ -47,7 +47,13 @@ agent:
     In Progress: 2
 
 codex:
-  command: codex app-server
+  command: |
+    export GOTOOLCHAIN=local
+    export GOCACHE="$PWD/.harness/cache/go-build"
+    export GOMODCACHE="$PWD/.harness/cache/go-mod"
+    export GOTMPDIR="$PWD/.harness/cache/go-tmp"
+    mkdir -p "$GOCACHE" "$GOMODCACHE" "$GOTMPDIR"
+    exec codex app-server
   approval_policy: never
   thread_sandbox: workspace-write
   turn_sandbox_policy:
@@ -89,5 +95,6 @@ Requirements:
 - If `.harness/review-notes.md` exists, read it first and resolve every blocking issue it lists.
 - Use the issue context to make the smallest correct change.
 - Run focused verification for the files you touched.
+- Keep runtime artifacts, caches, scratch files, and transcripts under `.harness/` only. Do not commit them.
 - Commit the final changes on the issue branch before ending the run.
 - Leave the workspace in a clean git state so the harness can open the GitHub pull request when it moves the issue to `Done`.

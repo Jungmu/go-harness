@@ -153,6 +153,12 @@ func TestEnsurePullRequestIgnoresHarnessArtifactsButRejectsOtherDirtyFiles(t *te
 	if err := os.WriteFile(filepath.Join(workspacePath, ".harness", "review-notes.md"), []byte("review notes\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(review-notes) error = %v", err)
 	}
+	if err := os.MkdirAll(filepath.Join(workspacePath, ".harness", "cache", "go-build"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.harness/cache/go-build) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspacePath, ".harness", "cache", "go-build", "cache.tmp"), []byte("cache\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(cache.tmp) error = %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(workspacePath, "dirty.txt"), []byte("dirty\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(dirty.txt) error = %v", err)
 	}

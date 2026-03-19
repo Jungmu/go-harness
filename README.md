@@ -124,6 +124,8 @@ Notes:
 - `workspace.root` supports `~` and environment expansion
 - for a real repository, prefer `git worktree add`/`git worktree remove` in hooks instead of cloning into each issue workspace
 - workspace hooks automatically receive `HARNESS_SOURCE_REPO`, `HARNESS_WORKFLOW_PATH`, and `HARNESS_WORKFLOW_DIR`; the examples use `HARNESS_SOURCE_REPO` for `git worktree`
+- keep runtime caches and scratch output under `.harness/` inside the issue workspace so PR handoff can ignore them safely
+- target repositories should ignore `.harness/` in git, and can also ignore legacy `.cache/` if older workflow templates still write there
 - `logging.level` accepts `debug`, `info`, `warn`, or `error`
 - `logging.capture_prompts` accepts `true` or `false`; set it to `true` only in development if you want raw prompt transcripts on disk
 - if no workflow path is passed, the daemon looks for `WORKFLOW.md` in its current working directory and then next to the executable
@@ -160,6 +162,7 @@ Important:
 - the review workflow overlays the main workflow config, so shared tracker, github, workspace, hook, codex, and logging settings do not need to be repeated
 - set `logging.level: debug` if you want a poll heartbeat and candidate-count logs while the daemon is idle
 - set `logging.capture_prompts: true` only when you need raw Codex exchange logs on disk for debugging
+- keep agent-created caches, scratch files, and tool output under `.harness/` and out of commits
 - startup logs print the resolved workflow path, `.env` path, and all tracked environment entries with sensitive values redacted
 
 ## Status And Operations

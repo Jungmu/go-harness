@@ -407,10 +407,11 @@ claim이 해제되었고 다시 poll 결과에 따라 재판단된다.
 10. runner는 이벤트를 스트리밍하고 `LiveSession`, `RecentEvents`, aggregate totals를 갱신한다.
 11. `turn/completed` 후 issue가 active면 같은 thread에서 continuation turn을 시작한다.
 12. run이 성공적으로 끝나고 explicit retry stop reason이 없으면 workspace branch를 push하고 GitHub PR을 생성 또는 재사용한다.
-13. PR handoff가 성공하면 issue를 `Done`으로 전환한다.
-14. PR handoff가 실패하면 attempt failure로 기록하고 retry policy를 적용한다.
-15. issue가 terminal이면 session을 중단하고 workspace를 정리한다.
-16. issue가 non-active non-terminal이면 session만 중단하고 cleanup은 정책에 따라 분리한다.
+13. workspace-local runtime artifacts such as review files, tool caches, and scratch output must stay under `.harness/` so PR handoff can ignore them safely.
+14. PR handoff가 성공하면 issue를 `Done`으로 전환한다.
+15. PR handoff가 실패하면 attempt failure로 기록하고 retry policy를 적용한다.
+16. issue가 terminal이면 session을 중단하고 workspace를 정리한다.
+17. issue가 non-active non-terminal이면 session만 중단하고 cleanup은 정책에 따라 분리한다.
 
 ### 11.3.a review dispatch 흐름
 
