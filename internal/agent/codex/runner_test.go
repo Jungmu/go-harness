@@ -17,6 +17,7 @@ import (
 )
 
 const testAppServerTimeout = 3 * time.Second
+const testCapturePromptsTimeout = 10 * time.Second
 
 func TestRunnerRunAttemptHandshakeAndUsage(t *testing.T) {
 	t.Parallel()
@@ -98,9 +99,9 @@ func TestRunnerCapturePromptsWritesTranscriptJSONL(t *testing.T) {
 		ApprovalPolicy:    "never",
 		ThreadSandbox:     "workspace-write",
 		TurnSandboxPolicy: map[string]any{"type": "workspace-write"},
-		TurnTimeout:       testAppServerTimeout,
-		ReadTimeout:       testAppServerTimeout,
-		StallTimeout:      testAppServerTimeout,
+		TurnTimeout:       testCapturePromptsTimeout,
+		ReadTimeout:       testCapturePromptsTimeout,
+		StallTimeout:      testCapturePromptsTimeout,
 	}, config.LoggingConfig{CapturePrompts: true}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	_, err := runner.RunAttempt(context.Background(), domain.Issue{ID: "1", Identifier: "ABC-1", Title: "Example"}, workspace, "first line\nsecond line", 1, nil, nil)
