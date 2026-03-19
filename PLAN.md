@@ -31,6 +31,7 @@
 - Go v1은 GitHub 연동을 필수로 두고, `Done` 전이 직전에 PR 생성 또는 재사용을 하네스 책임으로 둔다.
 - Go v1은 `github.token`이 비어 있으면 startup에서 `gh auth token --hostname <host>`로 GitHub CLI 인증을 재사용할 수 있다.
 - HTTP server는 `SPEC.md` 기준으로는 extension이지만, Go v1에서는 권장 기본 observability surface로 둔다.
+- Go v1의 기본 배포 경로는 `go install`이 아니라 GitHub Releases의 prebuilt binary다. 1차 지원 타깃은 macOS Apple Silicon, Linux x86_64, Linux ARM64다.
 
 ### 2.2 경로 표기 규칙
 
@@ -139,7 +140,7 @@ trusted environment 전제를 두더라도 path validation, scope narrowing, tim
 
 전제는 다음과 같다.
 
-- 사용자는 Go 환경과 CLI 운영에 익숙하다.
+- 사용자는 Go 설치 없이도 prebuilt binary로 실행할 수 있고, CLI 운영에는 익숙하다.
 - 트래커는 우선 Linear를 사용한다.
 - Codex 또는 동등한 app-server compatible runtime을 사용할 수 있다.
 - 운영자는 trusted environment 전제를 이해하고 직접 선택할 수 있다.

@@ -28,15 +28,57 @@ The current implementation is intended for trusted local or small-team environme
 
 More detail lives in `PLAN.md`, `SPEC.md`, and the docs under `docs/`.
 
-## Prerequisites
+## Install
 
-- Go `1.25`
+Primary distribution is prebuilt release binaries. Go is not required to run the harness.
+
+Supported release targets:
+
+- macOS Apple Silicon: `darwin-arm64`
+- Linux x86_64: `linux-amd64`
+- Linux ARM64: `linux-arm64`
+
+Windows is not a supported target. Use WSL if you need to run the harness from a Windows machine.
+
+Example install on macOS Apple Silicon:
+
+```bash
+curl -L https://github.com/Jungmu/go-harness/releases/latest/download/harnessd_darwin_arm64.tar.gz -o harnessd.tar.gz
+tar -xzf harnessd.tar.gz
+chmod +x harnessd
+sudo mv harnessd /usr/local/bin/harnessd
+```
+
+Example install on Ubuntu:
+
+```bash
+curl -L https://github.com/Jungmu/go-harness/releases/latest/download/harnessd_linux_amd64.tar.gz -o harnessd.tar.gz
+tar -xzf harnessd.tar.gz
+chmod +x harnessd
+sudo mv harnessd /usr/local/bin/harnessd
+```
+
+Example install on Linux ARM64:
+
+```bash
+curl -L https://github.com/Jungmu/go-harness/releases/latest/download/harnessd_linux_arm64.tar.gz -o harnessd.tar.gz
+tar -xzf harnessd.tar.gz
+chmod +x harnessd
+sudo mv harnessd /usr/local/bin/harnessd
+```
+
+Each release also publishes a matching `.sha256` file for checksum verification.
+
+## Runtime Prerequisites
+
 - `codex` installed and available on `PATH`
 - a Linear API key
 - a `WORKFLOW.md` file for the repository you want the harness to operate against
 - an optional sibling `REVIEW-WORKFLOW.md` if you want the daemon to process `In Review` issues
 
-## Build
+## Build From Source
+
+Building from source is mainly for contributors.
 
 ```bash
 go build -o bin/harnessd ./cmd/harnessd
@@ -47,16 +89,6 @@ Or use the repository `Makefile`:
 ```bash
 make build
 ```
-
-## Common Commands
-
-```bash
-make test
-make fmt
-make test-live-e2e
-```
-
-If a repository-root `.env` file exists, `make test` and `make test-live-e2e` load it before invoking `go test`.
 
 ## Minimal `WORKFLOW.md`
 
@@ -101,20 +133,20 @@ Notes:
 Run against an explicit workflow file:
 
 ```bash
-LINEAR_API_KEY=... ./bin/harnessd --port 8080 /absolute/path/to/WORKFLOW.md
+LINEAR_API_KEY=... harnessd --port 8080 /absolute/path/to/WORKFLOW.md
 ```
 
 Or run from a repository that already has `WORKFLOW.md`:
 
 ```bash
 cd /path/to/target-repo
-LINEAR_API_KEY=... /path/to/go-harness/bin/harnessd --port 8080
+LINEAR_API_KEY=... harnessd --port 8080
 ```
 
-Or keep `WORKFLOW.md` and `.env` next to the binary in `bin/` and start it without an explicit path:
+Or keep `WORKFLOW.md` and `.env` next to a copied `harnessd` binary and start it without an explicit path:
 
 ```bash
-./bin/harnessd --port 8080
+harnessd --port 8080
 ```
 
 Important:
@@ -131,13 +163,13 @@ Important:
 Start the daemon:
 
 ```bash
-./bin/harnessd --port 8080 /absolute/path/to/WORKFLOW.md
+harnessd --port 8080 /absolute/path/to/WORKFLOW.md
 ```
 
 Read runtime state from the CLI:
 
 ```bash
-./bin/harnessd status --addr http://127.0.0.1:8080
+harnessd status --addr http://127.0.0.1:8080
 ```
 
 HTTP endpoints:
@@ -259,6 +291,23 @@ Supported prompt variables and reload behavior are also documented there.
 - `docs/workflow-contract.md`: exact `WORKFLOW.md` behavior and defaults
 - `examples/WORKFLOW.md`: a fuller starter workflow for local Linear + Codex setups
 - `examples/REVIEW-WORKFLOW.md`: a fuller starter review workflow for `In Review` issues
+
+## Development
+
+Contributor prerequisites:
+
+- Go `1.25`
+
+Common commands:
+
+```bash
+make build
+make test
+make fmt
+make test-live-e2e
+```
+
+If a repository-root `.env` file exists, `make test` and `make test-live-e2e` load it before invoking `go test`.
 
 ## Limitations
 

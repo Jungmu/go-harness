@@ -1,0 +1,92 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: go test ./...
+
+  build:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            archive: harnessd_linux_amd64.tar.gz
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            archive: harnessd_linux_arm64.tar.gz
+          - runner: macos-latest
+            goos: darwin
+            goarch: arm64
+            archive: harnessd_darwin_arm64.tar.gz
+    runs-on: ${{ matrix.runner }}
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          GOOS="${{ matrix.goos }}" GOARCH="${{ matrix.goarch }}" go build -o dist/harnessd ./cmd/harnessd
+          tar -C dist -czf "dist/${{ matrix.archive }}" harnessd
+          shasum -a 256 "dist/${{ matrix.archive }}" > "dist/${{ matrix.archive }}.sha256"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: |
+            dist/${{ matrix.archive }}
+            dist/${{ matrix.archive }}.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/harnessd_linux_amd64.tar.gz
+            dist/harnessd_linux_amd64.tar.gz.sha256
+            dist/harnessd_linux_arm64.tar.gz
+            dist/harnessd_linux_arm64.tar.gz.sha256
+            dist/harnessd_darwin_arm64.tar.gz
+            dist/harnessd_darwin_arm64.tar.gz.sha256
