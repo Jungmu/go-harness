@@ -664,9 +664,13 @@ workspace:
 hooks:
   timeout_ms: 60000
   after_create: |
-    git clone git@github.com:me/my-repo.git .
+    test -n "$HARNESS_SOURCE_REPO" || { echo "HARNESS_SOURCE_REPO is required"; exit 1; }
+    git -C "$HARNESS_SOURCE_REPO" worktree add --detach "$PWD" main
   before_run: |
     git status --short
+  before_remove: |
+    test -n "$HARNESS_SOURCE_REPO" || exit 0
+    git -C "$HARNESS_SOURCE_REPO" worktree remove --force "$PWD"
 agent:
   max_concurrent_agents: 10
   max_turns: 20

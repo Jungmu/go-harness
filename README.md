@@ -121,6 +121,7 @@ Notes:
 - `tracker.project_slug` accepts a Linear project `slugId` or an exact project name
 - `tracker.project_slug` may also be set via `$ENV_VAR`
 - `workspace.root` supports `~` and environment expansion
+- for a real repository, prefer `git worktree add`/`git worktree remove` in hooks instead of cloning into each issue workspace; `examples/WORKFLOW.md` and `examples/REVIEW-WORKFLOW.md` show this pattern with `HARNESS_SOURCE_REPO`
 - `logging.level` accepts `debug`, `info`, `warn`, or `error`
 - `logging.capture_prompts` accepts `true` or `false`; set it to `true` only in development if you want raw prompt transcripts on disk
 - if no workflow path is passed, the daemon looks for `WORKFLOW.md` in its current working directory and then next to the executable
