@@ -879,6 +879,10 @@ func (o *Orchestrator) executeAttempt(ctx context.Context, issue domain.Issue, a
 					Message:      "first review agent completed; starting second review agent for consensus",
 				},
 			})
+			// Save first agent's review notes before clearing artifacts so we
+			// can restore them if the agents disagree (first rejected, second approved).
+			firstReviewNotes, _ := os.ReadFile(reviewNotesPath(workspace))
+
 			if prepErr := prepareReviewArtifacts(workspace); prepErr != nil {
 				err = prepErr
 			} else {
@@ -895,6 +899,12 @@ func (o *Orchestrator) executeAttempt(ctx context.Context, issue domain.Issue, a
 						if secondVerdict, peekErr2 := peekReviewVerdict(workspace); peekErr2 == nil &&
 							secondVerdict.Decision == reviewDecisionDone {
 							err = writeConsensusFailureVerdict(workspace, firstVerdict)
+							// Restore the first agent's notes so follow-up runs get
+							// the rejecting reviewer's blocking guidance, not the
+							// approving second reviewer's notes.
+							if err == nil && len(firstReviewNotes) > 0 {
+								err = os.WriteFile(reviewNotesPath(workspace), firstReviewNotes, 0o644)
+							}
 						}
 					}
 				}
