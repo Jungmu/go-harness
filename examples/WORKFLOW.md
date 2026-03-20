@@ -42,6 +42,7 @@ hooks:
   timeout_ms: 60000
 
 agent:
+  provider: codex
   max_concurrent_agents: 4
   max_turns: 20
   max_retry_backoff_ms: 300000
@@ -60,6 +61,13 @@ codex:
   thread_sandbox: workspace-write
   turn_sandbox_policy:
     type: workspace-write
+  turn_timeout_ms: 3600000
+  read_timeout_ms: 5000
+  stall_timeout_ms: 300000
+
+claude:
+  command: claude
+  permission_mode: bypassPermissions
   turn_timeout_ms: 3600000
   read_timeout_ms: 5000
   stall_timeout_ms: 300000

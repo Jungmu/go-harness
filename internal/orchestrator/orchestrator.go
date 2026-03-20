@@ -15,7 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go-harness/internal/agent/codex"
+	"go-harness/internal/agent"
 	"go-harness/internal/config"
 	"go-harness/internal/domain"
 	"go-harness/internal/workflow"
@@ -50,7 +50,7 @@ type WorkspaceManager interface {
 }
 
 type Runner interface {
-	RunAttempt(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error)
+	RunAttempt(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error)
 }
 
 type PullRequestCreator interface {
@@ -113,14 +113,14 @@ type state struct {
 
 type workerEvent struct {
 	IssueID string
-	Event   codex.Event
+	Event   agent.Event
 }
 
 type workerExit struct {
 	Issue     domain.Issue
 	Attempt   int
 	Workspace domain.Workspace
-	Result    codex.RunResult
+	Result    agent.RunResult
 	Refreshed *domain.Issue
 	Err       error
 }
@@ -304,11 +304,11 @@ func (o *Orchestrator) IssueSnapshot(identifier string) (domain.IssueRuntimeSnap
 }
 
 func (o *Orchestrator) issueTranscript(identifier string) []domain.PromptTranscriptEntry {
-	path := codex.TranscriptPath(o.cfg.Workspace.Root, identifier)
+	path := agent.TranscriptPath(o.cfg.Workspace.Root, identifier)
 	if path == "" {
 		return nil
 	}
-	entries, err := codex.ReadTranscript(path, 80)
+	entries, err := agent.ReadTranscript(path, 80)
 	if err != nil {
 		o.logger.Warn("prompt transcript read failed",
 			slog.String("issue", identifier),
@@ -822,30 +822,30 @@ func (o *Orchestrator) executeAttempt(ctx context.Context, issue domain.Issue, a
 	}
 	prompt = o.augmentPrompt(prompt, workspace)
 
-	var continueFn codex.ContinueFunc
+	var continueFn agent.ContinueFunc
 	if !o.reviewMode {
-		continueFn = func(runCtx context.Context, session domain.LiveSession) (codex.ContinueDecision, error) {
+		continueFn = func(runCtx context.Context, session domain.LiveSession) (agent.ContinueDecision, error) {
 			refreshed, err := o.refreshIssue(runCtx, runIssue.ID)
 			if err != nil {
-				return codex.ContinueDecision{}, err
+				return agent.ContinueDecision{}, err
 			}
 			if refreshed == nil {
-				return codex.ContinueDecision{Continue: false}, nil
+				return agent.ContinueDecision{Continue: false}, nil
 			}
 			if o.cfg.IsTerminalState(refreshed.State) || !o.cfg.IsActiveState(refreshed.State) {
-				return codex.ContinueDecision{
+				return agent.ContinueDecision{
 					Continue:       false,
 					RefreshedIssue: refreshed,
 				}, nil
 			}
 			if session.TurnCount >= o.cfg.Agent.MaxTurns {
-				return codex.ContinueDecision{
+				return agent.ContinueDecision{
 					Continue:       false,
 					StopReason:     "max_turns_reached",
 					RefreshedIssue: refreshed,
 				}, nil
 			}
-			return codex.ContinueDecision{
+			return agent.ContinueDecision{
 				Continue:       true,
 				NextPrompt:     workflow.RenderContinuationPrompt(*refreshed, session.TurnCount+1),
 				RefreshedIssue: refreshed,
@@ -853,7 +853,7 @@ func (o *Orchestrator) executeAttempt(ctx context.Context, issue domain.Issue, a
 		}
 	}
 
-	result, err := o.runner.RunAttempt(ctx, runIssue, workspace, prompt, attempt, func(event codex.Event) {
+	result, err := o.runner.RunAttempt(ctx, runIssue, workspace, prompt, attempt, func(event agent.Event) {
 		o.pushEvent(workerEvent{IssueID: runIssue.ID, Event: event})
 	}, continueFn)
 
@@ -973,7 +973,7 @@ func (o *Orchestrator) transitionIssueState(ctx context.Context, issue domain.Is
 	return transitioned, nil
 }
 
-func (o *Orchestrator) completeIssueIfNeeded(ctx context.Context, issue domain.Issue, workspace domain.Workspace, attempt int, result codex.RunResult) (*domain.Issue, string, error) {
+func (o *Orchestrator) completeIssueIfNeeded(ctx context.Context, issue domain.Issue, workspace domain.Workspace, attempt int, result agent.RunResult) (*domain.Issue, string, error) {
 	if o.reviewMode {
 		verdict, err := loadReviewVerdict(workspace)
 		if err != nil {
@@ -1139,18 +1139,20 @@ func (o *Orchestrator) applyWorkerEvent(st *state, event workerEvent) {
 
 	if entry.liveSession == nil {
 		entry.liveSession = &domain.LiveSession{
-			SessionID:    event.Event.SessionID,
-			ThreadID:     event.Event.ThreadID,
-			TurnID:       event.Event.TurnID,
-			StartedAt:    event.Event.At,
-			AppServerPID: event.Event.AppServerPID,
-			TurnCount:    entry.attempt,
-			Worker:       o.workerName,
+			Provider:       event.Event.Provider,
+			SessionID:      event.Event.SessionID,
+			ConversationID: event.Event.ConversationID,
+			TurnID:         event.Event.TurnID,
+			StartedAt:      event.Event.At,
+			RuntimePID:     event.Event.RuntimePID,
+			TurnCount:      entry.attempt,
+			Worker:         o.workerName,
 		}
 	}
 
+	entry.liveSession.Provider = event.Event.Provider
 	entry.liveSession.SessionID = event.Event.SessionID
-	entry.liveSession.ThreadID = event.Event.ThreadID
+	entry.liveSession.ConversationID = event.Event.ConversationID
 	entry.liveSession.TurnID = event.Event.TurnID
 	entry.liveSession.LastEvent = event.Event.Type
 	entry.liveSession.LastEventAt = event.Event.At
@@ -1172,18 +1174,19 @@ func (o *Orchestrator) applyWorkerEvent(st *state, event workerEvent) {
 	switch event.Event.Type {
 	case "session_started", "turn_started", "turn_completed", "turn_failed", "turn_cancelled", "unsupported_tool_call", "approval_auto_approved":
 		o.recordTimeline(st, entry.issue, entry.workspace, domain.TimelineEvent{
-			At:           event.Event.At,
-			IssueID:      entry.issue.ID,
-			Identifier:   entry.issue.Identifier,
-			Attempt:      entry.attempt,
-			Event:        event.Event.Type,
-			Status:       "running",
-			Message:      truncateLogValue(event.Event.Message, 240),
-			SessionID:    event.Event.SessionID,
-			ThreadID:     event.Event.ThreadID,
-			TurnID:       event.Event.TurnID,
-			WorkspaceKey: entry.workspace.WorkspaceKey,
-			Workspace:    entry.workspace.Path,
+			At:             event.Event.At,
+			IssueID:        entry.issue.ID,
+			Identifier:     entry.issue.Identifier,
+			Attempt:        entry.attempt,
+			Event:          event.Event.Type,
+			Status:         "running",
+			Message:        truncateLogValue(event.Event.Message, 240),
+			Provider:       event.Event.Provider,
+			SessionID:      event.Event.SessionID,
+			ConversationID: event.Event.ConversationID,
+			TurnID:         event.Event.TurnID,
+			WorkspaceKey:   entry.workspace.WorkspaceKey,
+			Workspace:      entry.workspace.Path,
 		})
 		attrs := []any{
 			slog.String("issue", entry.issue.Identifier),
@@ -1192,6 +1195,12 @@ func (o *Orchestrator) applyWorkerEvent(st *state, event workerEvent) {
 		}
 		if event.Event.SessionID != "" {
 			attrs = append(attrs, slog.String("session_id", event.Event.SessionID))
+		}
+		if event.Event.ConversationID != "" {
+			attrs = append(attrs, slog.String("conversation_id", event.Event.ConversationID))
+		}
+		if event.Event.Provider != "" {
+			attrs = append(attrs, slog.String("provider", event.Event.Provider))
 		}
 		if event.Event.Message != "" {
 			attrs = append(attrs, slog.String("message", truncateLogValue(event.Event.Message, 240)))
@@ -1286,19 +1295,20 @@ func (o *Orchestrator) applyWorkerExit(ctx context.Context, st *state, exit work
 		st.completed[exit.Refreshed.Identifier] = struct{}{}
 		delete(st.claimed, exit.Issue.ID)
 		o.recordTimeline(st, *exit.Refreshed, exit.Workspace, domain.TimelineEvent{
-			At:           time.Now().UTC(),
-			IssueID:      exit.Refreshed.ID,
-			Identifier:   exit.Refreshed.Identifier,
-			Attempt:      exit.Attempt,
-			Event:        "issue_completed",
-			Status:       "completed",
-			StateAfter:   exit.Refreshed.State,
-			SessionID:    exit.Result.Session.SessionID,
-			ThreadID:     exit.Result.Session.ThreadID,
-			TurnID:       exit.Result.Session.TurnID,
-			WorkspaceKey: exit.Workspace.WorkspaceKey,
-			Workspace:    exit.Workspace.Path,
-			Message:      "run completed and issue is now terminal",
+			At:             time.Now().UTC(),
+			IssueID:        exit.Refreshed.ID,
+			Identifier:     exit.Refreshed.Identifier,
+			Attempt:        exit.Attempt,
+			Event:          "issue_completed",
+			Status:         "completed",
+			StateAfter:     exit.Refreshed.State,
+			Provider:       exit.Result.Session.Provider,
+			SessionID:      exit.Result.Session.SessionID,
+			ConversationID: exit.Result.Session.ConversationID,
+			TurnID:         exit.Result.Session.TurnID,
+			WorkspaceKey:   exit.Workspace.WorkspaceKey,
+			Workspace:      exit.Workspace.Path,
+			Message:        "run completed and issue is now terminal",
 		})
 		o.logger.Info("issue completed",
 			slog.String("issue", exit.Refreshed.Identifier),
@@ -1309,20 +1319,21 @@ func (o *Orchestrator) applyWorkerExit(ctx context.Context, st *state, exit work
 	case exit.Err == nil && exit.Result.StopReason == reviewRejectedStopReason && exit.Refreshed != nil:
 		delete(st.claimed, exit.Issue.ID)
 		o.recordTimeline(st, *exit.Refreshed, exit.Workspace, domain.TimelineEvent{
-			At:           time.Now().UTC(),
-			IssueID:      exit.Refreshed.ID,
-			Identifier:   exit.Refreshed.Identifier,
-			Attempt:      exit.Attempt,
-			Event:        "issue_released",
-			Status:       "released",
-			Reason:       reviewRejectedStopReason,
-			StateAfter:   exit.Refreshed.State,
-			SessionID:    exit.Result.Session.SessionID,
-			ThreadID:     exit.Result.Session.ThreadID,
-			TurnID:       exit.Result.Session.TurnID,
-			WorkspaceKey: exit.Workspace.WorkspaceKey,
-			Workspace:    exit.Workspace.Path,
-			Message:      "review found blocking issues and released the issue back to todo",
+			At:             time.Now().UTC(),
+			IssueID:        exit.Refreshed.ID,
+			Identifier:     exit.Refreshed.Identifier,
+			Attempt:        exit.Attempt,
+			Event:          "issue_released",
+			Status:         "released",
+			Reason:         reviewRejectedStopReason,
+			StateAfter:     exit.Refreshed.State,
+			Provider:       exit.Result.Session.Provider,
+			SessionID:      exit.Result.Session.SessionID,
+			ConversationID: exit.Result.Session.ConversationID,
+			TurnID:         exit.Result.Session.TurnID,
+			WorkspaceKey:   exit.Workspace.WorkspaceKey,
+			Workspace:      exit.Workspace.Path,
+			Message:        "review found blocking issues and released the issue back to todo",
 		})
 		o.logger.Info("issue returned to todo after review",
 			slog.String("issue", exit.Refreshed.Identifier),
@@ -1332,20 +1343,21 @@ func (o *Orchestrator) applyWorkerExit(ctx context.Context, st *state, exit work
 		st.completed[exit.Refreshed.Identifier] = struct{}{}
 		delete(st.claimed, exit.Issue.ID)
 		o.recordTimeline(st, *exit.Refreshed, exit.Workspace, domain.TimelineEvent{
-			At:           time.Now().UTC(),
-			IssueID:      exit.Refreshed.ID,
-			Identifier:   exit.Refreshed.Identifier,
-			Attempt:      exit.Attempt,
-			Event:        "issue_completed",
-			Status:       "completed",
-			Reason:       "handoff_state",
-			StateAfter:   exit.Refreshed.State,
-			SessionID:    exit.Result.Session.SessionID,
-			ThreadID:     exit.Result.Session.ThreadID,
-			TurnID:       exit.Result.Session.TurnID,
-			WorkspaceKey: exit.Workspace.WorkspaceKey,
-			Workspace:    exit.Workspace.Path,
-			Message:      "run completed and issue moved to a non-active handoff state",
+			At:             time.Now().UTC(),
+			IssueID:        exit.Refreshed.ID,
+			Identifier:     exit.Refreshed.Identifier,
+			Attempt:        exit.Attempt,
+			Event:          "issue_completed",
+			Status:         "completed",
+			Reason:         "handoff_state",
+			StateAfter:     exit.Refreshed.State,
+			Provider:       exit.Result.Session.Provider,
+			SessionID:      exit.Result.Session.SessionID,
+			ConversationID: exit.Result.Session.ConversationID,
+			TurnID:         exit.Result.Session.TurnID,
+			WorkspaceKey:   exit.Workspace.WorkspaceKey,
+			Workspace:      exit.Workspace.Path,
+			Message:        "run completed and issue moved to a non-active handoff state",
 		})
 		o.logger.Info("issue handed off",
 			slog.String("issue", exit.Refreshed.Identifier),
@@ -1415,37 +1427,39 @@ func (o *Orchestrator) applyWorkerExit(ctx context.Context, st *state, exit work
 			reason = exit.Result.StopReason
 		}
 		o.recordTimeline(st, *exit.Refreshed, exit.Workspace, domain.TimelineEvent{
-			At:           time.Now().UTC(),
-			IssueID:      exit.Refreshed.ID,
-			Identifier:   exit.Refreshed.Identifier,
-			Attempt:      exit.Attempt,
-			Event:        "attempt_completed",
-			Status:       "retrying",
-			Reason:       reason,
-			StateAfter:   exit.Refreshed.State,
-			SessionID:    exit.Result.Session.SessionID,
-			ThreadID:     exit.Result.Session.ThreadID,
-			TurnID:       exit.Result.Session.TurnID,
-			WorkspaceKey: exit.Workspace.WorkspaceKey,
-			Workspace:    exit.Workspace.Path,
-			Message:      "attempt completed but the issue remains active",
+			At:             time.Now().UTC(),
+			IssueID:        exit.Refreshed.ID,
+			Identifier:     exit.Refreshed.Identifier,
+			Attempt:        exit.Attempt,
+			Event:          "attempt_completed",
+			Status:         "retrying",
+			Reason:         reason,
+			StateAfter:     exit.Refreshed.State,
+			Provider:       exit.Result.Session.Provider,
+			SessionID:      exit.Result.Session.SessionID,
+			ConversationID: exit.Result.Session.ConversationID,
+			TurnID:         exit.Result.Session.TurnID,
+			WorkspaceKey:   exit.Workspace.WorkspaceKey,
+			Workspace:      exit.Workspace.Path,
+			Message:        "attempt completed but the issue remains active",
 		})
 		o.scheduleRetry(ctx, st, *exit.Refreshed, exit.Attempt+1, reason, "", time.Now().UTC())
 	case exit.Err == nil:
 		delete(st.claimed, exit.Issue.ID)
 		o.recordTimeline(st, exit.Issue, exit.Workspace, domain.TimelineEvent{
-			At:           time.Now().UTC(),
-			IssueID:      exit.Issue.ID,
-			Identifier:   exit.Issue.Identifier,
-			Attempt:      exit.Attempt,
-			Event:        "attempt_completed",
-			Status:       "completed",
-			SessionID:    exit.Result.Session.SessionID,
-			ThreadID:     exit.Result.Session.ThreadID,
-			TurnID:       exit.Result.Session.TurnID,
-			WorkspaceKey: exit.Workspace.WorkspaceKey,
-			Workspace:    exit.Workspace.Path,
-			Message:      "attempt completed without retry",
+			At:             time.Now().UTC(),
+			IssueID:        exit.Issue.ID,
+			Identifier:     exit.Issue.Identifier,
+			Attempt:        exit.Attempt,
+			Event:          "attempt_completed",
+			Status:         "completed",
+			Provider:       exit.Result.Session.Provider,
+			SessionID:      exit.Result.Session.SessionID,
+			ConversationID: exit.Result.Session.ConversationID,
+			TurnID:         exit.Result.Session.TurnID,
+			WorkspaceKey:   exit.Workspace.WorkspaceKey,
+			Workspace:      exit.Workspace.Path,
+			Message:        "attempt completed without retry",
 		})
 		o.logger.Info("attempt completed",
 			slog.String("issue", exit.Issue.Identifier),
@@ -1454,21 +1468,22 @@ func (o *Orchestrator) applyWorkerExit(ctx context.Context, st *state, exit work
 	default:
 		entry.lastError = exit.Err.Error()
 		o.recordTimeline(st, exit.Issue, exit.Workspace, domain.TimelineEvent{
-			At:           time.Now().UTC(),
-			IssueID:      exit.Issue.ID,
-			Identifier:   exit.Issue.Identifier,
-			Attempt:      exit.Attempt,
-			Event:        "attempt_failed",
-			Status:       "retrying",
-			Reason:       retryReason(exit.Err),
-			StateAfter:   exit.Issue.State,
-			SessionID:    exit.Result.Session.SessionID,
-			ThreadID:     exit.Result.Session.ThreadID,
-			TurnID:       exit.Result.Session.TurnID,
-			WorkspaceKey: exit.Workspace.WorkspaceKey,
-			Workspace:    exit.Workspace.Path,
-			LastError:    exit.Err.Error(),
-			Message:      "attempt failed and will be retried",
+			At:             time.Now().UTC(),
+			IssueID:        exit.Issue.ID,
+			Identifier:     exit.Issue.Identifier,
+			Attempt:        exit.Attempt,
+			Event:          "attempt_failed",
+			Status:         "retrying",
+			Reason:         retryReason(exit.Err),
+			StateAfter:     exit.Issue.State,
+			Provider:       exit.Result.Session.Provider,
+			SessionID:      exit.Result.Session.SessionID,
+			ConversationID: exit.Result.Session.ConversationID,
+			TurnID:         exit.Result.Session.TurnID,
+			WorkspaceKey:   exit.Workspace.WorkspaceKey,
+			Workspace:      exit.Workspace.Path,
+			LastError:      exit.Err.Error(),
+			Message:        "attempt failed and will be retried",
 		})
 		o.logger.Error("attempt failed", slog.String("issue", exit.Issue.Identifier), slog.Int("attempt", exit.Attempt), slog.Any("error", exit.Err))
 		o.scheduleRetry(ctx, st, exit.Issue, exit.Attempt+1, retryReason(exit.Err), entry.lastError, time.Now().UTC())
@@ -1573,7 +1588,7 @@ func (o *Orchestrator) publishSnapshot(st *state) {
 		Running:        running,
 		Retrying:       retrying,
 		RecentActivity: recentActivity,
-		CodexTotals:    st.totals,
+		AgentTotals:    st.totals,
 		RateLimits:     domain.SortedRateLimits(st.rateLimits),
 		Completed:      completed,
 	})

@@ -37,7 +37,8 @@ type liveE2EProfile struct {
 	HandoffStateName  string
 	TerminalStateID   string
 	TerminalStateName string
-	CodexCommand      string
+	AgentProvider     string
+	AgentCommand      string
 }
 
 type liveWorkflowState struct {
@@ -85,9 +86,9 @@ func TestPickLiveWorkflowState(t *testing.T) {
 	}
 }
 
-func TestLiveLinearCodexHandsOffAtMaxTurns(t *testing.T) {
+func TestLiveLinearAgentHandsOffAtMaxTurns(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skipping live Linear + Codex E2E in short mode")
+		t.Skip("skipping live Linear agent E2E in short mode")
 	}
 
 	profile, ok := loadLiveE2EProfile(t)
@@ -115,7 +116,7 @@ func TestLiveLinearCodexHandsOffAtMaxTurns(t *testing.T) {
 		"projectId":   profile.ProjectID,
 		"stateId":     profile.activeStateID(),
 		"title":       "go-harness live e2e " + titleSuffix,
-		"description": "Temporary issue created by the go-harness live Linear + Codex E2E test.",
+		"description": "Temporary issue created by the go-harness live Linear agent E2E test.",
 	})
 	if err != nil {
 		t.Fatalf("createIssue() error = %v", err)
@@ -237,7 +238,7 @@ func loadLiveE2EProfile(t *testing.T) (liveE2EProfile, bool) {
 	t.Helper()
 
 	if os.Getenv("GO_HARNESS_LIVE_E2E") != "1" {
-		t.Skip("set GO_HARNESS_LIVE_E2E=1 to run the live Linear + Codex E2E test")
+		t.Skip("set GO_HARNESS_LIVE_E2E=1 to run the live Linear agent E2E test")
 	}
 
 	profile := liveE2EProfile{
@@ -247,10 +248,18 @@ func loadLiveE2EProfile(t *testing.T) (liveE2EProfile, bool) {
 		ActiveStateName:   strings.TrimSpace(os.Getenv("GO_HARNESS_LIVE_LINEAR_ACTIVE_STATE_NAME")),
 		HandoffStateName:  strings.TrimSpace(os.Getenv("GO_HARNESS_LIVE_LINEAR_HANDOFF_STATE_NAME")),
 		TerminalStateName: strings.TrimSpace(os.Getenv("GO_HARNESS_LIVE_LINEAR_TERMINAL_STATE_NAME")),
-		CodexCommand:      strings.TrimSpace(os.Getenv("GO_HARNESS_LIVE_CODEX_COMMAND")),
+		AgentProvider:     strings.TrimSpace(os.Getenv("GO_HARNESS_LIVE_AGENT_PROVIDER")),
+		AgentCommand:      strings.TrimSpace(os.Getenv("GO_HARNESS_LIVE_AGENT_COMMAND")),
 	}
-	if profile.CodexCommand == "" {
-		profile.CodexCommand = "codex app-server"
+	if profile.AgentProvider == "" {
+		profile.AgentProvider = "codex"
+	}
+	if profile.AgentCommand == "" {
+		if profile.AgentProvider == "claude" {
+			profile.AgentCommand = "claude"
+		} else {
+			profile.AgentCommand = "codex app-server"
+		}
 	}
 	if profile.HandoffStateName == "" {
 		profile.HandoffStateName = "In Review"
@@ -346,6 +355,7 @@ workspace:
   root: %q
 
 agent:
+  provider: %q
   max_concurrent_agents: 1
   max_turns: 1
   max_retry_backoff_ms: 1000
@@ -356,6 +366,13 @@ codex:
   thread_sandbox: workspace-write
   turn_sandbox_policy:
     type: workspace-write
+  turn_timeout_ms: 120000
+  read_timeout_ms: 15000
+  stall_timeout_ms: 30000
+
+claude:
+  command: %q
+  permission_mode: bypassPermissions
   turn_timeout_ms: 120000
   read_timeout_ms: 15000
   stall_timeout_ms: 30000
@@ -370,7 +387,7 @@ state={{ issue.state }}
 
 Do not inspect the repository. Do not run git. Do not ask for approval or user input.
 Do not modify any other files. End the turn immediately after the file exists.
-`, profile.ProjectSlug, activeStateBlock, profile.TerminalStateName, workspaceRoot, profile.CodexCommand, liveMarkerFileName)
+`, profile.ProjectSlug, activeStateBlock, profile.TerminalStateName, workspaceRoot, profile.AgentProvider, profile.AgentCommand, profile.AgentCommand, liveMarkerFileName)
 }
 
 func (p liveE2EProfile) activeStateID() string {

@@ -20,4 +20,4 @@ fmt:
 	$(GOFMT) -w $(FMT_DIRS)
 
 test-live-e2e:
-	set -a; if [ -f .env ]; then . ./.env; fi; set +a; GO_HARNESS_LIVE_E2E=1 $(GO) test $(MAIN_PKG) -run TestLiveLinearCodexHandsOffAtMaxTurns -v
+	set -a; if [ -f .env ]; then . ./.env; fi; set +a; GO_HARNESS_LIVE_E2E=1 $(GO) test $(MAIN_PKG) -run TestLiveLinearAgentHandsOffAtMaxTurns -v

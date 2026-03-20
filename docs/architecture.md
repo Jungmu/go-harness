@@ -9,7 +9,7 @@ The current Go harness implements:
 - optional sibling `REVIEW-WORKFLOW.md` loading for an in-process review lane
 - Linear polling, issue refresh, GitHub pull request creation, automatic state transitions, and a persistent harness progress comment
 - per-issue workspace creation and lifecycle hooks
-- local Codex app-server execution with same-session continuation turns
+- local Codex or Claude Code execution with provider-specific continuation turns
 - orchestrator-owned runtime state with retry and cancellation
 - JSON status API and CLI `status`
 
@@ -42,12 +42,18 @@ The current Go harness implements:
   - derives sanitized workspace paths
   - enforces root-bound path safety
   - runs `after_create`, `before_run`, `after_run`, `before_remove`
+- `internal/agent`
+  - owns the normalized runner contract, transcript capture helpers, and provider-neutral events/results
 - `internal/agent/codex`
   - launches `bash -lc <codex.command>`
   - performs `initialize -> initialized -> thread/start -> turn/start`
-  - reuses the same `thread_id` for continuation turns in one run
+  - reuses the same conversation for continuation turns in one run
   - streams events and usage totals
-  - optionally appends raw prompt and app-server transcript JSONL files under `workspace.root/.harness-prompts/`
+- `internal/agent/claude`
+  - launches `bash -lc <claude.command>`
+  - runs Claude Code headless with `--output-format stream-json`
+  - resumes the same conversation with `--resume <session_id>` on continuation turns
+  - normalizes Claude session metadata into the shared runner contract
 - `internal/orchestrator`
   - owns `claimed`, `running`, `retry`, `completed`
   - runs one-time startup cleanup for terminal workspaces
@@ -86,6 +92,6 @@ The current Go harness implements:
 
 ## Remaining Milestone 2+ Work
 
-- broader live Linear + real Codex coverage for tracker write flows
+- broader live Linear + real agent coverage for tracker write flows
 - tracker write tools
 - auth and multi-tenant hardening beyond trusted local operation

@@ -20,15 +20,17 @@ func TestRuntimeSurfaceMergesCodingAndReviewSnapshots(t *testing.T) {
 				Running: []domain.RunningSnapshot{{
 					Issue: domain.Issue{Identifier: "ABC-1"},
 					LiveSession: &domain.LiveSession{
-						SessionID: "coding-session",
-						Worker:    "coding",
+						Provider:       "codex",
+						SessionID:      "coding-session",
+						ConversationID: "coding-conversation",
+						Worker:         "coding",
 					},
 				}},
 				Retrying: []domain.RetryEntry{{Identifier: "ABC-2", DueAt: time.Date(2026, 3, 19, 8, 5, 0, 0, time.UTC)}},
 				RecentActivity: []domain.TimelineEvent{
 					{At: time.Date(2026, 3, 19, 8, 0, 10, 0, time.UTC), Identifier: "ABC-1", Event: "issue_claimed"},
 				},
-				CodexTotals: domain.RuntimeTotals{TotalTokens: 10},
+				AgentTotals: domain.RuntimeTotals{TotalTokens: 10},
 				Completed:   []string{"ABC-3"},
 			}
 		},
@@ -41,14 +43,16 @@ func TestRuntimeSurfaceMergesCodingAndReviewSnapshots(t *testing.T) {
 				Running: []domain.RunningSnapshot{{
 					Issue: domain.Issue{Identifier: "ABC-4"},
 					LiveSession: &domain.LiveSession{
-						SessionID: "review-session",
-						Worker:    "review",
+						Provider:       "claude",
+						SessionID:      "review-session",
+						ConversationID: "review-conversation",
+						Worker:         "review",
 					},
 				}},
 				RecentActivity: []domain.TimelineEvent{
 					{At: time.Date(2026, 3, 19, 8, 0, 20, 0, time.UTC), Identifier: "ABC-4", Event: "turn_completed"},
 				},
-				CodexTotals: domain.RuntimeTotals{TotalTokens: 4},
+				AgentTotals: domain.RuntimeTotals{TotalTokens: 4},
 				Completed:   []string{"ABC-5"},
 			}
 		},
@@ -66,11 +70,14 @@ func TestRuntimeSurfaceMergesCodingAndReviewSnapshots(t *testing.T) {
 	if !snapshot.Dispatch.Blocked || len(snapshot.Dispatch.Workers) != 2 {
 		t.Fatalf("dispatch = %#v", snapshot.Dispatch)
 	}
-	if snapshot.CodexTotals.TotalTokens != 14 {
-		t.Fatalf("total tokens = %d, want 14", snapshot.CodexTotals.TotalTokens)
+	if snapshot.AgentTotals.TotalTokens != 14 {
+		t.Fatalf("total tokens = %d, want 14", snapshot.AgentTotals.TotalTokens)
 	}
 	if len(snapshot.Running) != 2 || snapshot.Running[0].LiveSession.Worker != "coding" || snapshot.Running[1].LiveSession.Worker != "review" {
 		t.Fatalf("running = %#v", snapshot.Running)
+	}
+	if snapshot.Running[0].LiveSession.Provider != "codex" || snapshot.Running[1].LiveSession.Provider != "claude" {
+		t.Fatalf("providers = %#v", snapshot.Running)
 	}
 	if len(snapshot.Completed) != 2 {
 		t.Fatalf("completed = %#v", snapshot.Completed)

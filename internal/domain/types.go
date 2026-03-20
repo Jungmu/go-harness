@@ -55,19 +55,20 @@ type RunAttempt struct {
 }
 
 type LiveSession struct {
-	SessionID    string    `json:"session_id"`
-	ThreadID     string    `json:"thread_id"`
-	TurnID       string    `json:"turn_id"`
-	StartedAt    time.Time `json:"started_at"`
-	LastEvent    string    `json:"last_event"`
-	LastEventAt  time.Time `json:"last_event_at,omitempty"`
-	LastMessage  string    `json:"last_message,omitempty"`
-	InputTokens  int       `json:"input_tokens"`
-	OutputTokens int       `json:"output_tokens"`
-	TotalTokens  int       `json:"total_tokens"`
-	TurnCount    int       `json:"turn_count"`
-	AppServerPID int       `json:"app_server_pid,omitempty"`
-	Worker       string    `json:"worker,omitempty"`
+	Provider       string    `json:"provider,omitempty"`
+	SessionID      string    `json:"session_id"`
+	ConversationID string    `json:"conversation_id,omitempty"`
+	TurnID         string    `json:"turn_id,omitempty"`
+	StartedAt      time.Time `json:"started_at"`
+	LastEvent      string    `json:"last_event"`
+	LastEventAt    time.Time `json:"last_event_at,omitempty"`
+	LastMessage    string    `json:"last_message,omitempty"`
+	InputTokens    int       `json:"input_tokens"`
+	OutputTokens   int       `json:"output_tokens"`
+	TotalTokens    int       `json:"total_tokens"`
+	TurnCount      int       `json:"turn_count"`
+	RuntimePID     int       `json:"runtime_pid,omitempty"`
+	Worker         string    `json:"worker,omitempty"`
 }
 
 type RecentEvent struct {
@@ -78,22 +79,23 @@ type RecentEvent struct {
 }
 
 type TimelineEvent struct {
-	At           time.Time `json:"at"`
-	IssueID      string    `json:"issue_id,omitempty"`
-	Identifier   string    `json:"identifier,omitempty"`
-	Attempt      int       `json:"attempt,omitempty"`
-	Event        string    `json:"event"`
-	Status       string    `json:"status,omitempty"`
-	Message      string    `json:"message,omitempty"`
-	Reason       string    `json:"reason,omitempty"`
-	StateBefore  string    `json:"state_before,omitempty"`
-	StateAfter   string    `json:"state_after,omitempty"`
-	SessionID    string    `json:"session_id,omitempty"`
-	ThreadID     string    `json:"thread_id,omitempty"`
-	TurnID       string    `json:"turn_id,omitempty"`
-	WorkspaceKey string    `json:"workspace_key,omitempty"`
-	Workspace    string    `json:"workspace,omitempty"`
-	LastError    string    `json:"last_error,omitempty"`
+	At             time.Time `json:"at"`
+	IssueID        string    `json:"issue_id,omitempty"`
+	Identifier     string    `json:"identifier,omitempty"`
+	Attempt        int       `json:"attempt,omitempty"`
+	Event          string    `json:"event"`
+	Status         string    `json:"status,omitempty"`
+	Message        string    `json:"message,omitempty"`
+	Reason         string    `json:"reason,omitempty"`
+	StateBefore    string    `json:"state_before,omitempty"`
+	StateAfter     string    `json:"state_after,omitempty"`
+	Provider       string    `json:"provider,omitempty"`
+	SessionID      string    `json:"session_id,omitempty"`
+	ConversationID string    `json:"conversation_id,omitempty"`
+	TurnID         string    `json:"turn_id,omitempty"`
+	WorkspaceKey   string    `json:"workspace_key,omitempty"`
+	Workspace      string    `json:"workspace,omitempty"`
+	LastError      string    `json:"last_error,omitempty"`
 }
 
 type RetryEntry struct {
@@ -145,32 +147,33 @@ type StateSnapshot struct {
 	Running        []RunningSnapshot   `json:"running"`
 	Retrying       []RetryEntry        `json:"retrying"`
 	RecentActivity []TimelineEvent     `json:"recent_activity,omitempty"`
-	CodexTotals    RuntimeTotals       `json:"codex_totals"`
+	AgentTotals    RuntimeTotals       `json:"agent_totals"`
 	RateLimits     []RateLimitSnapshot `json:"rate_limits"`
 	Completed      []string            `json:"completed,omitempty"`
 }
 
 type IssueRuntimeSnapshot struct {
-	GeneratedAt      time.Time                 `json:"generated_at"`
-	Identifier       string                    `json:"identifier"`
-	Status           string                    `json:"status"`
-	Running          *RunningSnapshot          `json:"running,omitempty"`
-	Retry            *RetryEntry               `json:"retry,omitempty"`
-	History          []TimelineEvent           `json:"history,omitempty"`
-	PromptTranscript []PromptTranscriptEntry   `json:"prompt_transcript,omitempty"`
-	Completed        bool                      `json:"completed,omitempty"`
+	GeneratedAt      time.Time               `json:"generated_at"`
+	Identifier       string                  `json:"identifier"`
+	Status           string                  `json:"status"`
+	Running          *RunningSnapshot        `json:"running,omitempty"`
+	Retry            *RetryEntry             `json:"retry,omitempty"`
+	History          []TimelineEvent         `json:"history,omitempty"`
+	PromptTranscript []PromptTranscriptEntry `json:"prompt_transcript,omitempty"`
+	Completed        bool                    `json:"completed,omitempty"`
 }
 
 type PromptTranscriptEntry struct {
-	At        time.Time `json:"at"`
-	Attempt   int       `json:"attempt,omitempty"`
-	Direction string    `json:"direction"`
-	Channel   string    `json:"channel"`
-	SessionID string    `json:"session_id,omitempty"`
-	ThreadID  string    `json:"thread_id,omitempty"`
-	TurnID    string    `json:"turn_id,omitempty"`
-	TurnCount int       `json:"turn_count,omitempty"`
-	Payload   string    `json:"payload"`
+	At             time.Time `json:"at"`
+	Attempt        int       `json:"attempt,omitempty"`
+	Provider       string    `json:"provider,omitempty"`
+	Direction      string    `json:"direction"`
+	Channel        string    `json:"channel"`
+	SessionID      string    `json:"session_id,omitempty"`
+	ConversationID string    `json:"conversation_id,omitempty"`
+	TurnID         string    `json:"turn_id,omitempty"`
+	TurnCount      int       `json:"turn_count,omitempty"`
+	Payload        string    `json:"payload"`
 }
 
 type SnapshotCounts struct {
@@ -225,11 +228,11 @@ func SanitizeWorkspaceKey(identifier string) string {
 	return sanitized
 }
 
-func FormatSessionID(threadID, turnID string) string {
-	if threadID == "" || turnID == "" {
+func FormatSessionID(conversationID, turnID string) string {
+	if conversationID == "" || turnID == "" {
 		return ""
 	}
-	return threadID + "-" + turnID
+	return conversationID + "-" + turnID
 }
 
 func SortedRateLimits(rateLimits map[string]RateLimitSnapshot) []RateLimitSnapshot {

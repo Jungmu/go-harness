@@ -14,7 +14,7 @@ import (
 
 	"log/slog"
 
-	"go-harness/internal/agent/codex"
+	"go-harness/internal/agent"
 	"go-harness/internal/config"
 	"go-harness/internal/domain"
 	"go-harness/internal/workflow"
@@ -38,14 +38,14 @@ func TestOrchestratorMovesIssueToInProgressThenDone(t *testing.T) {
 	}
 	workspaceManager := &fakeWorkspaceManager{root: cfg.Workspace.Root}
 	runner := &fakeRunner{
-		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
+		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error) {
 			if issue.State != "In Progress" {
 				t.Fatalf("runner issue state = %q, want In Progress", issue.State)
 			}
-			onEvent(codex.Event{Type: "session_started", At: time.Now().UTC(), SessionID: "thread-1-turn-1", ThreadID: "thread-1", TurnID: "turn-1"})
-			onEvent(codex.Event{Type: "turn_completed", At: time.Now().UTC(), Usage: domain.RuntimeTotals{InputTokens: 1, OutputTokens: 2, TotalTokens: 3}})
-			return codex.RunResult{
-				Session:        domain.LiveSession{SessionID: "thread-1-turn-1", ThreadID: "thread-1", TurnID: "turn-1"},
+			onEvent(agent.Event{Type: "session_started", At: time.Now().UTC(), SessionID: "thread-1-turn-1", ConversationID: "thread-1", TurnID: "turn-1"})
+			onEvent(agent.Event{Type: "turn_completed", At: time.Now().UTC(), Usage: domain.RuntimeTotals{InputTokens: 1, OutputTokens: 2, TotalTokens: 3}})
+			return agent.RunResult{
+				Session:        domain.LiveSession{SessionID: "thread-1-turn-1", ConversationID: "thread-1", TurnID: "turn-1"},
 				Totals:         domain.RuntimeTotals{InputTokens: 1, OutputTokens: 2, TotalTokens: 3},
 				RefreshedIssue: &issue,
 			}, nil
@@ -109,9 +109,9 @@ func TestOrchestratorRetriesWhenPullRequestCreationFails(t *testing.T) {
 	}
 	workspaceManager := &fakeWorkspaceManager{root: cfg.Workspace.Root}
 	runner := &fakeRunner{
-		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
-			return codex.RunResult{
-				Session:        domain.LiveSession{SessionID: "thread-1-turn-1", ThreadID: "thread-1", TurnID: "turn-1"},
+		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error) {
+			return agent.RunResult{
+				Session:        domain.LiveSession{SessionID: "thread-1-turn-1", ConversationID: "thread-1", TurnID: "turn-1"},
 				RefreshedIssue: &issue,
 			}, nil
 		},
@@ -163,10 +163,10 @@ func TestOrchestratorCancelsTerminalIssueAndCleansWorkspace(t *testing.T) {
 	}
 	workspaceManager := &fakeWorkspaceManager{root: cfg.Workspace.Root}
 	runner := &fakeRunner{
-		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
-			onEvent(codex.Event{Type: "session_started", At: time.Now().UTC(), SessionID: "thread-1-turn-1", ThreadID: "thread-1", TurnID: "turn-1"})
+		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error) {
+			onEvent(agent.Event{Type: "session_started", At: time.Now().UTC(), SessionID: "thread-1-turn-1", ConversationID: "thread-1", TurnID: "turn-1"})
 			<-ctx.Done()
-			return codex.RunResult{}, ctx.Err()
+			return agent.RunResult{}, ctx.Err()
 		},
 	}
 
@@ -207,10 +207,10 @@ func TestOrchestratorHandsOffIssueToInReviewWhenMaxTurnsReached(t *testing.T) {
 	}
 	workspaceManager := &fakeWorkspaceManager{root: cfg.Workspace.Root}
 	runner := &fakeRunner{
-		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
-			onEvent(codex.Event{Type: "session_started", At: time.Now().UTC(), SessionID: "thread-1-turn-1", ThreadID: "thread-1", TurnID: "turn-1", TurnCount: 1})
-			return codex.RunResult{
-				Session:        domain.LiveSession{SessionID: "thread-1-turn-1", ThreadID: "thread-1", TurnID: "turn-1", TurnCount: 1},
+		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error) {
+			onEvent(agent.Event{Type: "session_started", At: time.Now().UTC(), SessionID: "thread-1-turn-1", ConversationID: "thread-1", TurnID: "turn-1", TurnCount: 1})
+			return agent.RunResult{
+				Session:        domain.LiveSession{SessionID: "thread-1-turn-1", ConversationID: "thread-1", TurnID: "turn-1", TurnCount: 1},
 				StopReason:     "max_turns_reached",
 				RefreshedIssue: &issue,
 			}, nil
@@ -276,8 +276,8 @@ func TestApplyWorkerExitPrefersSuccessfulHandoffOverNonActiveStopReason(t *testi
 		Issue:     issue,
 		Attempt:   1,
 		Workspace: workspace,
-		Result: codex.RunResult{
-			Session: domain.LiveSession{SessionID: "thread-1-turn-1", ThreadID: "thread-1", TurnID: "turn-1"},
+		Result: agent.RunResult{
+			Session: domain.LiveSession{SessionID: "thread-1-turn-1", ConversationID: "thread-1", TurnID: "turn-1"},
 		},
 		Refreshed: &handoff,
 	})
@@ -322,9 +322,9 @@ func TestOrchestratorContinuationStopsWithoutRetryWhenIssueTurnsTerminal(t *test
 	}
 	workspaceManager := &fakeWorkspaceManager{root: cfg.Workspace.Root}
 	runner := &fakeRunner{
-		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
-			first := domain.LiveSession{SessionID: "thread-1-turn-1", ThreadID: "thread-1", TurnID: "turn-1", TurnCount: 1}
-			onEvent(codex.Event{Type: "session_started", At: time.Now().UTC(), SessionID: first.SessionID, ThreadID: first.ThreadID, TurnID: first.TurnID, TurnCount: first.TurnCount})
+		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error) {
+			first := domain.LiveSession{SessionID: "thread-1-turn-1", ConversationID: "thread-1", TurnID: "turn-1", TurnCount: 1}
+			onEvent(agent.Event{Type: "session_started", At: time.Now().UTC(), SessionID: first.SessionID, ConversationID: first.ConversationID, TurnID: first.TurnID, TurnCount: first.TurnCount})
 
 			decision, err := continueFn(ctx, first)
 			if err != nil {
@@ -340,8 +340,8 @@ func TestOrchestratorContinuationStopsWithoutRetryWhenIssueTurnsTerminal(t *test
 				t.Fatalf("continuation prompt missing turn count: %q", decision.NextPrompt)
 			}
 
-			second := domain.LiveSession{SessionID: "thread-1-turn-2", ThreadID: "thread-1", TurnID: "turn-2", TurnCount: 2}
-			onEvent(codex.Event{Type: "turn_started", At: time.Now().UTC(), SessionID: second.SessionID, ThreadID: second.ThreadID, TurnID: second.TurnID, TurnCount: second.TurnCount})
+			second := domain.LiveSession{SessionID: "thread-1-turn-2", ConversationID: "thread-1", TurnID: "turn-2", TurnCount: 2}
+			onEvent(agent.Event{Type: "turn_started", At: time.Now().UTC(), SessionID: second.SessionID, ConversationID: second.ConversationID, TurnID: second.TurnID, TurnCount: second.TurnCount})
 
 			decision, err = continueFn(ctx, second)
 			if err != nil {
@@ -354,7 +354,7 @@ func TestOrchestratorContinuationStopsWithoutRetryWhenIssueTurnsTerminal(t *test
 				t.Fatalf("continueFn(second) refreshed issue = %#v, want terminal issue", decision.RefreshedIssue)
 			}
 
-			return codex.RunResult{
+			return agent.RunResult{
 				Session:        second,
 				RefreshedIssue: decision.RefreshedIssue,
 			}, nil
@@ -406,9 +406,9 @@ func TestOrchestratorUpsertsProgressCommentAcrossLifecycle(t *testing.T) {
 		},
 	}
 	runner := &fakeRunner{
-		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
-			return codex.RunResult{
-				Session:        domain.LiveSession{SessionID: "thread-1-turn-1", ThreadID: "thread-1", TurnID: "turn-1"},
+		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error) {
+			return agent.RunResult{
+				Session:        domain.LiveSession{SessionID: "thread-1-turn-1", ConversationID: "thread-1", TurnID: "turn-1"},
 				RefreshedIssue: &issue,
 			}, nil
 		},
@@ -459,9 +459,9 @@ func TestOrchestratorIgnoresProgressCommentFailures(t *testing.T) {
 		},
 	}
 	runner := &fakeRunner{
-		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
-			return codex.RunResult{
-				Session:        domain.LiveSession{SessionID: "thread-1-turn-1", ThreadID: "thread-1", TurnID: "turn-1"},
+		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error) {
+			return agent.RunResult{
+				Session:        domain.LiveSession{SessionID: "thread-1-turn-1", ConversationID: "thread-1", TurnID: "turn-1"},
 				RefreshedIssue: &issue,
 			}, nil
 		},
@@ -503,7 +503,7 @@ func TestReviewOrchestratorMovesIssueToDoneFromVerdict(t *testing.T) {
 	}
 	workspaceManager := &fakeWorkspaceManager{root: cfg.Workspace.Root}
 	runner := &fakeRunner{
-		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
+		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error) {
 			if continueFn != nil {
 				t.Fatal("review run should not use continuation")
 			}
@@ -527,9 +527,9 @@ func TestReviewOrchestratorMovesIssueToDoneFromVerdict(t *testing.T) {
 			if err := os.WriteFile(reviewResultPath(workspace), raw, 0o644); err != nil {
 				t.Fatalf("WriteFile(verdict) error = %v", err)
 			}
-			onEvent(codex.Event{Type: "session_started", At: time.Now().UTC(), SessionID: "review-thread-turn-1", ThreadID: "review-thread", TurnID: "turn-1", TurnCount: 1})
-			return codex.RunResult{
-				Session: domain.LiveSession{SessionID: "review-thread-turn-1", ThreadID: "review-thread", TurnID: "turn-1", TurnCount: 1},
+			onEvent(agent.Event{Type: "session_started", At: time.Now().UTC(), SessionID: "review-thread-turn-1", ConversationID: "review-thread", TurnID: "turn-1", TurnCount: 1})
+			return agent.RunResult{
+				Session: domain.LiveSession{SessionID: "review-thread-turn-1", ConversationID: "review-thread", TurnID: "turn-1", TurnCount: 1},
 			}, nil
 		},
 	}
@@ -574,7 +574,7 @@ func TestReviewOrchestratorMovesIssueBackToTodoWithoutCleanup(t *testing.T) {
 	}
 	workspaceManager := &fakeWorkspaceManager{root: cfg.Workspace.Root}
 	runner := &fakeRunner{
-		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
+		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error) {
 			if err := os.MkdirAll(filepath.Dir(reviewNotesPath(workspace)), 0o755); err != nil {
 				t.Fatalf("MkdirAll() error = %v", err)
 			}
@@ -598,8 +598,8 @@ func TestReviewOrchestratorMovesIssueBackToTodoWithoutCleanup(t *testing.T) {
 			if err := os.WriteFile(reviewResultPath(workspace), raw, 0o644); err != nil {
 				t.Fatalf("WriteFile(verdict) error = %v", err)
 			}
-			return codex.RunResult{
-				Session: domain.LiveSession{SessionID: "review-thread-turn-1", ThreadID: "review-thread", TurnID: "turn-1", TurnCount: 1},
+			return agent.RunResult{
+				Session: domain.LiveSession{SessionID: "review-thread-turn-1", ConversationID: "review-thread", TurnID: "turn-1", TurnCount: 1},
 			}, nil
 		},
 	}
@@ -656,9 +656,9 @@ func TestReviewOrchestratorRetriesWhenVerdictMissingAndClearsStaleVerdict(t *tes
 		},
 	}
 	runner := &fakeRunner{
-		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
-			return codex.RunResult{
-				Session: domain.LiveSession{SessionID: "review-thread-turn-1", ThreadID: "review-thread", TurnID: "turn-1", TurnCount: 1},
+		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error) {
+			return agent.RunResult{
+				Session: domain.LiveSession{SessionID: "review-thread-turn-1", ConversationID: "review-thread", TurnID: "turn-1", TurnCount: 1},
 			}, nil
 		},
 	}
@@ -711,15 +711,15 @@ func TestCodingOrchestratorPromptMentionsReviewNotesWhenPresent(t *testing.T) {
 		},
 	}
 	runner := &fakeRunner{
-		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
+		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error) {
 			if !strings.Contains(prompt, ".harness/review-notes.md") {
 				t.Fatalf("coding prompt missing review-notes guidance: %q", prompt)
 			}
 			if !strings.Contains(prompt, "GitHub handoff:") {
 				t.Fatalf("coding prompt missing github handoff guidance: %q", prompt)
 			}
-			return codex.RunResult{
-				Session:        domain.LiveSession{SessionID: "thread-1-turn-1", ThreadID: "thread-1", TurnID: "turn-1"},
+			return agent.RunResult{
+				Session:        domain.LiveSession{SessionID: "thread-1-turn-1", ConversationID: "thread-1", TurnID: "turn-1"},
 				RefreshedIssue: &domain.Issue{ID: "1", Identifier: "ABC-1", Title: "Example", State: "Done"},
 			}, nil
 		},
@@ -772,15 +772,15 @@ func TestOrchestratorReleasesMissingRunningIssueAndRecoversSlot(t *testing.T) {
 	}
 	workspaceManager := &fakeWorkspaceManager{root: cfg.Workspace.Root}
 	runner := &fakeRunner{
-		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
-			onEvent(codex.Event{Type: "session_started", At: time.Now().UTC(), SessionID: issue.Identifier + "-session", ThreadID: issue.Identifier + "-thread", TurnID: "turn-1"})
+		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error) {
+			onEvent(agent.Event{Type: "session_started", At: time.Now().UTC(), SessionID: issue.Identifier + "-session", ConversationID: issue.Identifier + "-thread", TurnID: "turn-1"})
 			if issue.ID == first.ID {
 				firstStarted.Store(true)
 				<-ctx.Done()
-				return codex.RunResult{}, ctx.Err()
+				return agent.RunResult{}, ctx.Err()
 			}
 			secondStarted.Store(true)
-			return codex.RunResult{RefreshedIssue: &issue}, nil
+			return agent.RunResult{RefreshedIssue: &issue}, nil
 		},
 	}
 
@@ -947,9 +947,9 @@ func TestOrchestratorStartupCleanupRemovesTerminalWorkspaceAndKeepsAuditFiles(t 
 		pollTerminalIssues: func() []domain.Issue { return []domain.Issue{{ID: "1", Identifier: "ABC-1", State: "Done"}} },
 	}
 	workspaceManager := &fakeWorkspaceManager{root: cfg.Workspace.Root}
-	orch := newTestOrchestrator(cfg, tracker, workspaceManager, &fakeRunner{run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
+	orch := newTestOrchestrator(cfg, tracker, workspaceManager, &fakeRunner{run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error) {
 		t.Fatal("runner should not start")
-		return codex.RunResult{}, nil
+		return agent.RunResult{}, nil
 	}})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -982,9 +982,9 @@ func TestOrchestratorStartupCleanupContinuesOnTrackerFailure(t *testing.T) {
 		pollTerminalErr:    os.ErrPermission,
 	}
 
-	orch := newTestOrchestrator(cfg, tracker, &fakeWorkspaceManager{root: cfg.Workspace.Root}, &fakeRunner{run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
+	orch := newTestOrchestrator(cfg, tracker, &fakeWorkspaceManager{root: cfg.Workspace.Root}, &fakeRunner{run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error) {
 		t.Fatal("runner should not start")
-		return codex.RunResult{}, nil
+		return agent.RunResult{}, nil
 	}})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1006,9 +1006,9 @@ func TestOrchestratorStartupCleanupIgnoresMissingWorkspace(t *testing.T) {
 		pollTerminalIssues: func() []domain.Issue { return []domain.Issue{{ID: "1", Identifier: "ABC-404", State: "Done"}} },
 	}
 	workspaceManager := &fakeWorkspaceManager{root: cfg.Workspace.Root}
-	orch := newTestOrchestrator(cfg, tracker, workspaceManager, &fakeRunner{run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
+	orch := newTestOrchestrator(cfg, tracker, workspaceManager, &fakeRunner{run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error) {
 		t.Fatal("runner should not start")
-		return codex.RunResult{}, nil
+		return agent.RunResult{}, nil
 	}})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1105,10 +1105,10 @@ func (f *fakeWorkspaceManager) Cleanup(_ context.Context, workspace domain.Works
 }
 
 type fakeRunner struct {
-	run func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error)
+	run func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error)
 }
 
-func (f *fakeRunner) RunAttempt(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
+func (f *fakeRunner) RunAttempt(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error) {
 	return f.run(ctx, issue, workspace, prompt, attempt, onEvent, continueFn)
 }
 

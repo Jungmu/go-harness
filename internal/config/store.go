@@ -25,12 +25,15 @@ const (
 	defaultMaxConcurrent   = 10
 	defaultMaxTurns        = 20
 	defaultMaxRetryBackoff = 5 * time.Minute
+	defaultAgentProvider   = "codex"
 	defaultCodexCommand    = "codex app-server"
+	defaultClaudeCommand   = "claude"
 	defaultTurnTimeout     = time.Hour
 	defaultReadTimeout     = 5 * time.Second
 	defaultStallTimeout    = 5 * time.Minute
 	defaultApprovalPolicy  = "never"
 	defaultThreadSandbox   = "workspace-write"
+	defaultPermissionMode  = "bypassPermissions"
 	defaultLogLevel        = "info"
 	ReviewWorkflowFilename = "REVIEW-WORKFLOW.md"
 	reviewActiveStateName  = "In Review"
@@ -67,6 +70,7 @@ type RuntimeConfig struct {
 	Hooks          HooksConfig
 	Agent          AgentConfig
 	Codex          CodexConfig
+	Claude         ClaudeConfig
 	Logging        LoggingConfig
 	Server         ServerConfig
 }
@@ -109,6 +113,7 @@ type HooksConfig struct {
 }
 
 type AgentConfig struct {
+	Provider                   string
 	MaxConcurrentAgents        int
 	MaxTurns                   int
 	MaxRetryBackoff            time.Duration
@@ -123,6 +128,19 @@ type CodexConfig struct {
 	TurnTimeout       time.Duration
 	ReadTimeout       time.Duration
 	StallTimeout      time.Duration
+}
+
+type ClaudeConfig struct {
+	Command         string
+	PermissionMode  string
+	AllowedTools    []string
+	DisallowedTools []string
+	Model           string
+	FallbackModel   string
+	Effort          string
+	TurnTimeout     time.Duration
+	ReadTimeout     time.Duration
+	StallTimeout    time.Duration
 }
 
 type ServerConfig struct {
@@ -395,6 +413,7 @@ func applyConfig(cfg *RuntimeConfig, raw map[string]any, env envResolver) error 
 	}
 
 	if agentMap := mapValue(raw, "agent"); agentMap != nil {
+		cfg.Agent.Provider = stringValue(agentMap, "provider", cfg.Agent.Provider)
 		if value, ok := intValue(agentMap, "max_concurrent_agents"); ok {
 			cfg.Agent.MaxConcurrentAgents = value
 		}
@@ -430,6 +449,25 @@ func applyConfig(cfg *RuntimeConfig, raw map[string]any, env envResolver) error 
 		}
 		if value, ok := intValue(codexMap, "stall_timeout_ms"); ok {
 			cfg.Codex.StallTimeout = time.Duration(value) * time.Millisecond
+		}
+	}
+
+	if claudeMap := mapValue(raw, "claude"); claudeMap != nil {
+		cfg.Claude.Command = stringValue(claudeMap, "command", cfg.Claude.Command)
+		cfg.Claude.PermissionMode = stringValue(claudeMap, "permission_mode", cfg.Claude.PermissionMode)
+		cfg.Claude.AllowedTools = stringSliceValue(claudeMap, "allowed_tools")
+		cfg.Claude.DisallowedTools = stringSliceValue(claudeMap, "disallowed_tools")
+		cfg.Claude.Model = stringValue(claudeMap, "model", cfg.Claude.Model)
+		cfg.Claude.FallbackModel = stringValue(claudeMap, "fallback_model", cfg.Claude.FallbackModel)
+		cfg.Claude.Effort = stringValue(claudeMap, "effort", cfg.Claude.Effort)
+		if value, ok := intValue(claudeMap, "turn_timeout_ms"); ok {
+			cfg.Claude.TurnTimeout = time.Duration(value) * time.Millisecond
+		}
+		if value, ok := intValue(claudeMap, "read_timeout_ms"); ok {
+			cfg.Claude.ReadTimeout = time.Duration(value) * time.Millisecond
+		}
+		if value, ok := intValue(claudeMap, "stall_timeout_ms"); ok {
+			cfg.Claude.StallTimeout = time.Duration(value) * time.Millisecond
 		}
 	}
 
@@ -488,23 +526,47 @@ func validateAndNormalize(cfg *RuntimeConfig, env envResolver) error {
 	if cfg.Agent.MaxConcurrentAgents <= 0 {
 		return &ValidationError{Field: "agent.max_concurrent_agents", Message: "must be positive"}
 	}
+	cfg.Agent.Provider = strings.ToLower(strings.TrimSpace(cfg.Agent.Provider))
+	switch cfg.Agent.Provider {
+	case "codex", "claude":
+	case "":
+		cfg.Agent.Provider = defaultAgentProvider
+	default:
+		return &ValidationError{Field: "agent.provider", Message: "must be one of codex, claude"}
+	}
 	if cfg.Agent.MaxTurns <= 0 {
 		return &ValidationError{Field: "agent.max_turns", Message: "must be positive"}
 	}
 	if cfg.Agent.MaxRetryBackoff <= 0 {
 		return &ValidationError{Field: "agent.max_retry_backoff_ms", Message: "must be positive"}
 	}
-	if strings.TrimSpace(cfg.Codex.Command) == "" {
-		return &ValidationError{Field: "codex.command", Message: "must not be empty"}
-	}
-	if cfg.Codex.TurnTimeout <= 0 {
-		return &ValidationError{Field: "codex.turn_timeout_ms", Message: "must be positive"}
-	}
-	if cfg.Codex.ReadTimeout <= 0 {
-		return &ValidationError{Field: "codex.read_timeout_ms", Message: "must be positive"}
-	}
-	if cfg.Codex.StallTimeout <= 0 {
-		return &ValidationError{Field: "codex.stall_timeout_ms", Message: "must be positive"}
+	switch cfg.Agent.Provider {
+	case "codex":
+		if strings.TrimSpace(cfg.Codex.Command) == "" {
+			return &ValidationError{Field: "codex.command", Message: "must not be empty"}
+		}
+		if cfg.Codex.TurnTimeout <= 0 {
+			return &ValidationError{Field: "codex.turn_timeout_ms", Message: "must be positive"}
+		}
+		if cfg.Codex.ReadTimeout <= 0 {
+			return &ValidationError{Field: "codex.read_timeout_ms", Message: "must be positive"}
+		}
+		if cfg.Codex.StallTimeout <= 0 {
+			return &ValidationError{Field: "codex.stall_timeout_ms", Message: "must be positive"}
+		}
+	case "claude":
+		if strings.TrimSpace(cfg.Claude.Command) == "" {
+			return &ValidationError{Field: "claude.command", Message: "must not be empty"}
+		}
+		if cfg.Claude.TurnTimeout <= 0 {
+			return &ValidationError{Field: "claude.turn_timeout_ms", Message: "must be positive"}
+		}
+		if cfg.Claude.ReadTimeout <= 0 {
+			return &ValidationError{Field: "claude.read_timeout_ms", Message: "must be positive"}
+		}
+		if cfg.Claude.StallTimeout <= 0 {
+			return &ValidationError{Field: "claude.stall_timeout_ms", Message: "must be positive"}
+		}
 	}
 	switch strings.ToLower(strings.TrimSpace(cfg.Logging.Level)) {
 	case "debug", "info", "warn", "error":
@@ -699,6 +761,7 @@ func defaultRuntimeConfig(sourcePath, promptTemplate, envPath string, dotEnvStat
 		},
 		Hooks: HooksConfig{Timeout: defaultHooksTimeout},
 		Agent: AgentConfig{
+			Provider:                   defaultAgentProvider,
 			MaxConcurrentAgents:        defaultMaxConcurrent,
 			MaxTurns:                   defaultMaxTurns,
 			MaxRetryBackoff:            defaultMaxRetryBackoff,
@@ -712,6 +775,13 @@ func defaultRuntimeConfig(sourcePath, promptTemplate, envPath string, dotEnvStat
 			TurnTimeout:       defaultTurnTimeout,
 			ReadTimeout:       defaultReadTimeout,
 			StallTimeout:      defaultStallTimeout,
+		},
+		Claude: ClaudeConfig{
+			Command:        defaultClaudeCommand,
+			PermissionMode: defaultPermissionMode,
+			TurnTimeout:    defaultTurnTimeout,
+			ReadTimeout:    defaultReadTimeout,
+			StallTimeout:   defaultStallTimeout,
 		},
 		Logging: LoggingConfig{
 			Level:          defaultLogLevel,
@@ -738,6 +808,8 @@ func cloneRuntimeConfig(cfg RuntimeConfig) RuntimeConfig {
 	cloned.Tracker.terminalStateSet = cloneStateSet(cfg.Tracker.terminalStateSet)
 	cloned.Agent.MaxConcurrentAgentsByState = cloneIntMap(cfg.Agent.MaxConcurrentAgentsByState)
 	cloned.Codex.TurnSandboxPolicy = cloneAnyMap(cfg.Codex.TurnSandboxPolicy)
+	cloned.Claude.AllowedTools = append([]string{}, cfg.Claude.AllowedTools...)
+	cloned.Claude.DisallowedTools = append([]string{}, cfg.Claude.DisallowedTools...)
 	return cloned
 }
 

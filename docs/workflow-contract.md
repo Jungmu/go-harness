@@ -33,6 +33,7 @@ If a sibling `REVIEW-WORKFLOW.md` exists next to the active `WORKFLOW.md`, the d
 - `hooks`
 - `agent`
 - `codex`
+- `claude`
 - `logging`
 - `server`
 
@@ -49,6 +50,7 @@ Unknown keys are ignored.
 - `workspace.root = <system-temp>/symphony_workspaces`
 - `hooks.timeout_ms = 60000`
 - `agent.max_concurrent_agents = 10`
+- `agent.provider = "codex"`
 - `agent.max_turns = 20`
 - `agent.max_retry_backoff_ms = 300000`
 - `codex.command = "codex app-server"`
@@ -58,12 +60,18 @@ Unknown keys are ignored.
 - `codex.turn_timeout_ms = 3600000`
 - `codex.read_timeout_ms = 5000`
 - `codex.stall_timeout_ms = 300000`
+- `claude.command = "claude"`
+- `claude.permission_mode = "bypassPermissions"`
+- `claude.turn_timeout_ms = 3600000`
+- `claude.read_timeout_ms = 5000`
+- `claude.stall_timeout_ms = 300000`
 - `logging.level = "info"`
 - `logging.capture_prompts = false`
 
 ## Value Resolution
 
 - `tracker.api_key` accepts a literal value or `$VAR_NAME`.
+- `agent.provider` accepts `codex` or `claude`.
 - `tracker.project_slug` accepts a Linear project `slugId` or an exact project name.
 - `github.token` accepts a literal value or `$VAR_NAME`.
 - `github.owner`, `github.repo`, `github.base_branch`, `github.endpoint`, and `github.remote_url` accept literal values or `$VAR_NAME`.
@@ -73,6 +81,7 @@ Unknown keys are ignored.
 - `logging.capture_prompts` accepts a boolean. Non-boolean values return `invalid logging.capture_prompts: must be a boolean`.
 - `github.draft_pull_request` accepts a boolean. Non-boolean values return `invalid github.draft_pull_request: must be a boolean`.
 - The shell command in `codex.command` is passed directly to `bash -lc`.
+- The shell command in `claude.command` is passed directly to `bash -lc`, and the runtime appends the Claude CLI flags needed for unattended `--print --output-format stream-json` execution.
 - `github.endpoint` accepts GitHub web URLs and API URLs. Supported examples include `https://github.com/`, `https://api.github.com`, `https://github.krafton.com/`, and `https://github.krafton.com/api/v3`.
 - `github.token` is optional. If it is empty, daemon startup runs `gh auth token --hostname <host>` using the host derived from `github.endpoint`.
 - If GitHub CLI auth is missing for that host, startup fails and the operator must run `gh auth login --hostname <host>` or set `github.token`.
@@ -116,6 +125,7 @@ Unknown variables and filters return `workflow_template_render_error`.
 - The review workflow must use the same `github.endpoint`, `github.owner`, `github.repo`, `github.base_branch`, and `github.remote_url` as the main workflow.
 - The review workflow must use the same `tracker.project_slug`, `workspace.root`, and `tracker.terminal_states` set as the main workflow.
 - The review workflow must use `tracker.active_states = ["In Review"]`.
+- The review workflow may choose a different `agent.provider` than the main workflow.
 - An invalid `REVIEW-WORKFLOW.md` blocks daemon startup if the file exists.
 - Review reloads still have their own file validation, but inherited main-workflow config changes also trigger a review effective-config reload. An invalid review reload blocks only review dispatch.
 - Review prompts are rendered from the `REVIEW-WORKFLOW.md` body template and then extended with an internal review contract suffix.
@@ -142,9 +152,11 @@ Unknown variables and filters return `workflow_template_render_error`.
 - Before the first turn starts, the runtime moves a claimed issue to `In Progress` if it is not already there.
 - When work starts, retries, hands off to review, or completes, the runtime creates or updates one persistent Linear comment whose body starts with `## Harness Progress`.
 - The first turn prompt is rendered from the `WORKFLOW.md` body template.
-- If the issue is still active after `turn/completed`, the runner reuses the same live Codex thread and workspace.
+- If the issue is still active after `turn/completed`, the runner continues the same provider-specific conversation in the same workspace.
 - Continuation turns use an internal continuation prompt instead of re-rendering the full workflow template.
 - The continuation prompt includes the issue identifier, refreshed tracker state, and the next turn count.
+- Codex continuations reuse one live app-server thread inside the same subprocess.
+- Claude continuations start a fresh CLI process and resume the same Claude conversation with `--resume <session_id>`.
 - If the refreshed issue is still active and the current turn count has reached `agent.max_turns`, the run stops and the orchestrator transitions the issue to `In Review`.
 - Before the runtime transitions an issue to `Done`, it pushes the current workspace `HEAD` to the issue branch and creates or reuses a GitHub pull request.
 - The GitHub handoff push treats the issue branch as harness-managed state and may replace older remote issue-branch history on retry.
@@ -177,6 +189,7 @@ This is currently implemented as poll-time file change detection, not an `fsnoti
 - Running snapshots include `live_session.worker` so operators can distinguish `coding` from `review`.
 - The runtime also appends JSONL audit records under `workspace.root/.harness-history/`.
 - The persistent `## Harness Progress` Linear comment is tracker-only state; it is not projected into the HTTP status API.
-- If `logging.capture_prompts = true`, the Codex runner also appends per-issue JSONL prompt transcripts under `workspace.root/.harness-prompts/`.
+- If `logging.capture_prompts = true`, the active agent runner appends per-issue JSONL prompt transcripts under `workspace.root/.harness-prompts/`.
 - Prompt transcripts record the plain rendered turn prompt plus raw stdin/stdout/stderr lines for that issue attempt.
+- Prompt transcript entries include `provider`, `session_id`, and `conversation_id` when available.
 - Prompt transcripts are not included in `GET /api/v1/state`.

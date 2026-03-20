@@ -219,19 +219,17 @@ State tracked while a coding-agent subprocess is running.
 
 Fields:
 
-- `session_id` (string, `<thread_id>-<turn_id>`)
-- `thread_id` (string)
-- `turn_id` (string)
-- `codex_app_server_pid` (string or null)
-- `last_codex_event` (string/enum or null)
-- `last_codex_timestamp` (timestamp or null)
-- `last_codex_message` (summarized payload)
-- `codex_input_tokens` (integer)
-- `codex_output_tokens` (integer)
-- `codex_total_tokens` (integer)
-- `last_reported_input_tokens` (integer)
-- `last_reported_output_tokens` (integer)
-- `last_reported_total_tokens` (integer)
+- `provider` (string, for example `codex` or `claude`)
+- `session_id` (string, provider-specific turn session ID)
+- `conversation_id` (string or null)
+- `turn_id` (string or null)
+- `runtime_pid` (string or null)
+- `last_event` (string/enum or null)
+- `last_event_timestamp` (timestamp or null)
+- `last_message` (summarized payload)
+- `input_tokens` (integer)
+- `output_tokens` (integer)
+- `total_tokens` (integer)
 - `turn_count` (integer)
   - Number of coding-agent turns started within the current worker lifetime.
 
@@ -260,8 +258,8 @@ Fields:
 - `claimed` (set of issue IDs reserved/running/retrying)
 - `retry_attempts` (map `issue_id -> RetryEntry`)
 - `completed` (set of issue IDs; bookkeeping only, not dispatch gating)
-- `codex_totals` (aggregate tokens + runtime seconds)
-- `codex_rate_limits` (latest rate-limit snapshot from agent events)
+- `agent_totals` (aggregate tokens + runtime seconds)
+- `rate_limits` (latest rate-limit snapshot from agent events)
 
 ### 4.2 Stable Identifiers and Normalization Rules
 
@@ -403,6 +401,10 @@ Fields:
 
 Fields:
 
+- `provider` (string)
+  - Supported values: `codex`, `claude`
+  - Default: `codex`
+  - Changes should be re-applied at runtime and affect subsequent dispatch decisions.
 - `max_concurrent_agents` (integer or string integer)
   - Default: `10`
   - Changes should be re-applied at runtime and affect subsequent dispatch decisions.
@@ -443,6 +445,33 @@ fields locally if they want stricter startup checks.
 - `stall_timeout_ms` (integer)
   - Default: `300000` (5 minutes)
   - If `<= 0`, stall detection is disabled.
+
+#### 5.3.7 `claude` (object)
+
+Fields:
+
+- `command` (string shell command)
+  - Default: `claude`
+  - The runtime launches this command via `bash -lc` in the workspace directory and appends the
+    Claude Code CLI flags required for unattended headless execution.
+- `permission_mode` (Claude Code permission mode)
+  - Default: `bypassPermissions`
+- `allowed_tools` (list of strings)
+  - Default: omitted
+- `disallowed_tools` (list of strings)
+  - Default: omitted
+- `model` (string)
+  - Default: omitted
+- `fallback_model` (string)
+  - Default: omitted
+- `effort` (string)
+  - Default: omitted
+- `turn_timeout_ms` (integer)
+  - Default: `3600000` (1 hour)
+- `read_timeout_ms` (integer)
+  - Default: `5000`
+- `stall_timeout_ms` (integer)
+  - Default: `300000` (5 minutes)
 
 ### 5.4 Prompt Template Contract
 
@@ -570,6 +599,7 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `hooks.before_remove`: shell script or null
 - `hooks.timeout_ms`: integer, default `60000`
 - `agent.max_concurrent_agents`: integer, default `10`
+- `agent.provider`: string, default `codex`
 - `agent.max_turns`: integer, default `20`
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
@@ -580,6 +610,16 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `codex.turn_timeout_ms`: integer, default `3600000`
 - `codex.read_timeout_ms`: integer, default `5000`
 - `codex.stall_timeout_ms`: integer, default `300000`
+- `claude.command`: shell command string, default `claude`
+- `claude.permission_mode`: string, default `bypassPermissions`
+- `claude.allowed_tools`: list of strings, default omitted
+- `claude.disallowed_tools`: list of strings, default omitted
+- `claude.model`: string, default omitted
+- `claude.fallback_model`: string, default omitted
+- `claude.effort`: string, default omitted
+- `claude.turn_timeout_ms`: integer, default `3600000`
+- `claude.read_timeout_ms`: integer, default `5000`
+- `claude.stall_timeout_ms`: integer, default `300000`
 - `server.port` (extension): integer, optional; enables the optional HTTP server, `0` may be used
   for ephemeral local bind, and CLI `--port` overrides it
 
@@ -921,16 +961,18 @@ Compatibility profile:
 
 Subprocess launch parameters:
 
-- Command: `codex.command`
-- Invocation: `bash -lc <codex.command>`
+- Command: selected provider command (`codex.command` or `claude.command`)
+- Invocation: `bash -lc <provider.command>`
 - Working directory: workspace path
 - Stdout/stderr: separate streams
-- Framing: line-delimited protocol messages on stdout (JSON-RPC-like JSON per line)
+- Framing: provider-specific streaming output on stdout
 
 Notes:
 
-- The default command is `codex app-server`.
-- Approval policy, cwd, and prompt are expressed in the protocol messages in Section 10.2.
+- The default Codex command is `codex app-server`.
+- The default Claude command is `claude`.
+- Approval policy, cwd, and prompt are expressed in either the Codex protocol messages or the
+  Claude CLI flags, depending on provider.
 
 Recommended additional process settings:
 
@@ -980,10 +1022,15 @@ semantics):
 
 Session identifiers:
 
-- Read `thread_id` from `thread/start` result `result.thread.id`
-- Read `turn_id` from each `turn/start` result `result.turn.id`
-- Emit `session_id = "<thread_id>-<turn_id>"`
-- Reuse the same `thread_id` for all continuation turns inside one worker run
+- Codex:
+  - Read `thread_id` from `thread/start` result `result.thread.id`
+  - Read `turn_id` from each `turn/start` result `result.turn.id`
+  - Emit `session_id = "<thread_id>-<turn_id>"`
+  - Reuse the same `thread_id` for all continuation turns inside one worker run
+- Claude:
+  - Read `conversation_id` from the CLI `session_id`
+  - Reuse that conversation by invoking `claude --resume <conversation_id>` for continuation turns
+  - Emit a provider-specific per-turn `session_id`
 
 ### 10.3 Streaming Turn Processing
 

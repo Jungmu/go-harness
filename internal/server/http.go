@@ -576,8 +576,8 @@ var dashboardTemplate = template.Must(template.New("dashboard").Funcs(template.F
             </div>
             <div class="stat">
               <span class="stat-label">Total Tokens</span>
-              <div class="stat-value">{{ .CodexTotals.TotalTokens }}</div>
-              <div class="stat-note">{{ .CodexTotals.InputTokens }} in · {{ .CodexTotals.OutputTokens }} out</div>
+              <div class="stat-value">{{ .AgentTotals.TotalTokens }}</div>
+              <div class="stat-note">{{ .AgentTotals.InputTokens }} in · {{ .AgentTotals.OutputTokens }} out</div>
             </div>
           </div>
           {{ if .Dispatch.Workers }}

@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"net/http"
 
+	"go-harness/internal/agent"
+	"go-harness/internal/agent/claude"
 	"go-harness/internal/agent/codex"
 	"go-harness/internal/config"
 	"go-harness/internal/domain"
@@ -68,9 +70,14 @@ type dynamicRunner struct {
 	logger *slog.Logger
 }
 
-func (d *dynamicRunner) RunAttempt(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(codex.Event), continueFn codex.ContinueFunc) (codex.RunResult, error) {
+func (d *dynamicRunner) RunAttempt(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error) {
 	cfg := d.store.Current()
-	return codex.NewRunner(cfg.Codex, cfg.Logging, d.logger).RunAttempt(ctx, issue, workspace, prompt, attempt, onEvent, continueFn)
+	switch cfg.Agent.Provider {
+	case "claude":
+		return claude.NewRunner(cfg.Claude, cfg.Logging, d.logger).RunAttempt(ctx, issue, workspace, prompt, attempt, onEvent, continueFn)
+	default:
+		return codex.NewRunner(cfg.Codex, cfg.Logging, d.logger).RunAttempt(ctx, issue, workspace, prompt, attempt, onEvent, continueFn)
+	}
 }
 
 type dynamicPullRequestCreator struct {

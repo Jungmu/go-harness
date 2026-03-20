@@ -60,11 +60,11 @@ func mergeStateSnapshots(coding, review domain.StateSnapshot) domain.StateSnapsh
 	merged.Running = mergeRunningSnapshots(coding.Running, review.Running)
 	merged.Retrying = mergeRetryEntries(coding.Retrying, review.Retrying)
 	merged.RecentActivity = mergeTimelineEvents(coding.RecentActivity, review.RecentActivity)
-	merged.CodexTotals = domain.RuntimeTotals{
-		InputTokens:    coding.CodexTotals.InputTokens + review.CodexTotals.InputTokens,
-		OutputTokens:   coding.CodexTotals.OutputTokens + review.CodexTotals.OutputTokens,
-		TotalTokens:    coding.CodexTotals.TotalTokens + review.CodexTotals.TotalTokens,
-		SecondsRunning: coding.CodexTotals.SecondsRunning + review.CodexTotals.SecondsRunning,
+	merged.AgentTotals = domain.RuntimeTotals{
+		InputTokens:    coding.AgentTotals.InputTokens + review.AgentTotals.InputTokens,
+		OutputTokens:   coding.AgentTotals.OutputTokens + review.AgentTotals.OutputTokens,
+		TotalTokens:    coding.AgentTotals.TotalTokens + review.AgentTotals.TotalTokens,
+		SecondsRunning: coding.AgentTotals.SecondsRunning + review.AgentTotals.SecondsRunning,
 	}
 	merged.RateLimits = mergeRateLimits(coding.RateLimits, review.RateLimits)
 	merged.Completed = mergeCompleted(coding.Completed, review.Completed)

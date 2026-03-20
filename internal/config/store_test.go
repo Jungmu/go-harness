@@ -1057,3 +1057,162 @@ Prompt
 		t.Fatalf("Tracker.APIKey = %q, want dotenv-token-2", reloaded.Tracker.APIKey)
 	}
 }
+
+func TestStoreDefaultsAgentProviderToCodex(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("LINEAR_API_KEY", "linear-token")
+
+	path := filepath.Join(root, "WORKFLOW.md")
+	content := withRequiredGitHubWorkflow(t, `---
+tracker:
+  kind: linear
+  api_key: $LINEAR_API_KEY
+  project_slug: TEST
+---
+Prompt
+`)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := NewStore(workflow.NewLoader()).LoadAndValidate(path)
+	if err != nil {
+		t.Fatalf("LoadAndValidate() error = %v", err)
+	}
+	if cfg.Agent.Provider != "codex" {
+		t.Fatalf("Agent.Provider = %q, want codex", cfg.Agent.Provider)
+	}
+}
+
+func TestStoreLoadAndValidateSupportsClaudeProvider(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("LINEAR_API_KEY", "linear-token")
+
+	path := filepath.Join(root, "WORKFLOW.md")
+	content := withRequiredGitHubWorkflow(t, `---
+tracker:
+  kind: linear
+  api_key: $LINEAR_API_KEY
+  project_slug: TEST
+agent:
+  provider: claude
+claude:
+  command: claude
+  permission_mode: bypassPermissions
+  allowed_tools:
+    - Bash
+  disallowed_tools:
+    - Edit
+  model: sonnet
+  fallback_model: opus
+  effort: high
+  turn_timeout_ms: 120000
+  read_timeout_ms: 7000
+  stall_timeout_ms: 45000
+---
+Prompt
+`)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := NewStore(workflow.NewLoader()).LoadAndValidate(path)
+	if err != nil {
+		t.Fatalf("LoadAndValidate() error = %v", err)
+	}
+	if cfg.Agent.Provider != "claude" {
+		t.Fatalf("Agent.Provider = %q, want claude", cfg.Agent.Provider)
+	}
+	if cfg.Claude.PermissionMode != "bypassPermissions" {
+		t.Fatalf("Claude.PermissionMode = %q", cfg.Claude.PermissionMode)
+	}
+	if len(cfg.Claude.AllowedTools) != 1 || cfg.Claude.AllowedTools[0] != "Bash" {
+		t.Fatalf("Claude.AllowedTools = %#v", cfg.Claude.AllowedTools)
+	}
+	if cfg.Claude.FallbackModel != "opus" {
+		t.Fatalf("Claude.FallbackModel = %q", cfg.Claude.FallbackModel)
+	}
+}
+
+func TestStoreReloadIfChangedReloadsWhenProviderChanges(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("LINEAR_API_KEY", "linear-token")
+
+	path := filepath.Join(root, "WORKFLOW.md")
+	initial := withRequiredGitHubWorkflow(t, `---
+tracker:
+  kind: linear
+  api_key: $LINEAR_API_KEY
+  project_slug: TEST
+agent:
+  provider: codex
+---
+Prompt
+`)
+	if err := os.WriteFile(path, []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewStore(workflow.NewLoader())
+	cfg, err := store.LoadAndValidate(path)
+	if err != nil {
+		t.Fatalf("LoadAndValidate() error = %v", err)
+	}
+	if cfg.Agent.Provider != "codex" {
+		t.Fatalf("Agent.Provider = %q, want codex", cfg.Agent.Provider)
+	}
+
+	time.Sleep(20 * time.Millisecond)
+	updated := withRequiredGitHubWorkflow(t, `---
+tracker:
+  kind: linear
+  api_key: $LINEAR_API_KEY
+  project_slug: TEST
+agent:
+  provider: claude
+claude:
+  command: claude
+---
+Prompt
+`)
+	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, changed, err := store.ReloadIfChanged()
+	if err != nil {
+		t.Fatalf("ReloadIfChanged() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("ReloadIfChanged() changed = false, want true")
+	}
+	if reloaded.Agent.Provider != "claude" {
+		t.Fatalf("Agent.Provider = %q, want claude", reloaded.Agent.Provider)
+	}
+}
+
+func TestValidateReviewWorkflowAllowsDifferentAgentProvider(t *testing.T) {
+	mainCfg := defaultRuntimeConfig("/repo/WORKFLOW.md", "Main prompt", "", fileState{})
+	mainCfg.Tracker.Kind = "linear"
+	mainCfg.Tracker.APIKey = "linear-token"
+	mainCfg.Tracker.ProjectSlug = "MAIN"
+	mainCfg.GitHub.Owner = "acme"
+	mainCfg.GitHub.Repo = "widgets"
+	mainCfg.GitHub.BaseBranch = "main"
+	mainCfg.Agent.Provider = "codex"
+	mainCfg.Tracker.ActiveStates = []string{"Todo", "In Progress"}
+	mainCfg.Tracker.TerminalStates = []string{"Done", "Closed"}
+	mainCfg.Tracker.activeStateSet = makeStateSet(mainCfg.Tracker.ActiveStates)
+	mainCfg.Tracker.terminalStateSet = makeStateSet(mainCfg.Tracker.TerminalStates)
+
+	reviewCfg := cloneRuntimeConfig(mainCfg)
+	reviewCfg.SourcePath = "/repo/REVIEW-WORKFLOW.md"
+	reviewCfg.Agent.Provider = "claude"
+	reviewCfg.Claude.Command = "claude"
+	reviewCfg.Tracker.ActiveStates = []string{"In Review"}
+	reviewCfg.Tracker.activeStateSet = makeStateSet(reviewCfg.Tracker.ActiveStates)
+
+	if err := ValidateReviewWorkflow(mainCfg, reviewCfg); err != nil {
+		t.Fatalf("ValidateReviewWorkflow() error = %v", err)
+	}
+}

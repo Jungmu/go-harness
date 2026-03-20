@@ -2,7 +2,6 @@ package codex
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,6 +11,7 @@ import (
 
 	"log/slog"
 
+	"go-harness/internal/agent"
 	"go-harness/internal/config"
 	"go-harness/internal/domain"
 )
@@ -78,7 +78,7 @@ func TestRunnerUnsupportedToolCallContinues(t *testing.T) {
 	}, config.LoggingConfig{}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	var events []string
-	_, err := runner.RunAttempt(context.Background(), domain.Issue{Identifier: "ABC-1", Title: "Example"}, workspace, "prompt", 1, func(event Event) {
+	_, err := runner.RunAttempt(context.Background(), domain.Issue{Identifier: "ABC-1", Title: "Example"}, workspace, "prompt", 1, func(event agent.Event) {
 		events = append(events, event.Type)
 	}, nil)
 	if err != nil {
@@ -109,19 +109,10 @@ func TestRunnerCapturePromptsWritesTranscriptJSONL(t *testing.T) {
 		t.Fatalf("RunAttempt() error = %v", err)
 	}
 
-	path := filepath.Join(filepath.Dir(workspace.Path), promptTranscriptDirname, "ABC-1.jsonl")
-	data, err := os.ReadFile(path)
+	path := filepath.Join(filepath.Dir(workspace.Path), agent.PromptTranscriptDirname, "ABC-1.jsonl")
+	entries, err := agent.ReadTranscript(path, 80)
 	if err != nil {
-		t.Fatalf("ReadFile(%q) error = %v", path, err)
-	}
-
-	var entries []transcriptEntry
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		var entry transcriptEntry
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			t.Fatalf("Unmarshal(transcript line) error = %v; line=%q", err, line)
-		}
-		entries = append(entries, entry)
+		t.Fatalf("ReadTranscript(%q) error = %v", path, err)
 	}
 
 	if !containsTranscriptEntry(entries, "send", "prompt", "first line\nsecond line") {
@@ -150,20 +141,20 @@ func TestRunnerContinuationReusesThreadAndStartsSecondTurn(t *testing.T) {
 		StallTimeout:      testAppServerTimeout,
 	}, config.LoggingConfig{}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
-	var startedEvents []Event
-	result, err := runner.RunAttempt(context.Background(), domain.Issue{Identifier: "ABC-1", Title: "Example", State: "In Progress"}, workspace, "prompt", 1, func(event Event) {
+	var startedEvents []agent.Event
+	result, err := runner.RunAttempt(context.Background(), domain.Issue{Identifier: "ABC-1", Title: "Example", State: "In Progress"}, workspace, "prompt", 1, func(event agent.Event) {
 		if event.Type == "session_started" || event.Type == "turn_started" {
 			startedEvents = append(startedEvents, event)
 		}
-	}, func(_ context.Context, session domain.LiveSession) (ContinueDecision, error) {
+	}, func(_ context.Context, session domain.LiveSession) (agent.ContinueDecision, error) {
 		if session.TurnCount == 1 {
-			return ContinueDecision{
+			return agent.ContinueDecision{
 				Continue:       true,
 				NextPrompt:     "continue prompt",
 				RefreshedIssue: &domain.Issue{Identifier: "ABC-1", State: "In Progress"},
 			}, nil
 		}
-		return ContinueDecision{
+		return agent.ContinueDecision{
 			Continue:       false,
 			RefreshedIssue: &domain.Issue{Identifier: "ABC-1", State: "Done"},
 		}, nil
@@ -171,8 +162,8 @@ func TestRunnerContinuationReusesThreadAndStartsSecondTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunAttempt() error = %v", err)
 	}
-	if result.Session.ThreadID != "thread-1" {
-		t.Fatalf("ThreadID = %q, want thread-1", result.Session.ThreadID)
+	if result.Session.ConversationID != "thread-1" {
+		t.Fatalf("ConversationID = %q, want thread-1", result.Session.ConversationID)
 	}
 	if result.Session.TurnID != "turn-2" {
 		t.Fatalf("TurnID = %q, want turn-2", result.Session.TurnID)
@@ -183,8 +174,8 @@ func TestRunnerContinuationReusesThreadAndStartsSecondTurn(t *testing.T) {
 	if len(startedEvents) != 2 {
 		t.Fatalf("started events = %#v", startedEvents)
 	}
-	if startedEvents[0].ThreadID != startedEvents[1].ThreadID {
-		t.Fatalf("thread ids differ across continuation: %#v", startedEvents)
+	if startedEvents[0].ConversationID != startedEvents[1].ConversationID {
+		t.Fatalf("conversation ids differ across continuation: %#v", startedEvents)
 	}
 
 	transcript, err := os.ReadFile(filepath.Join(workspace.Path, "transcript.log"))
@@ -216,8 +207,8 @@ func TestRunnerUsesStartedNotificationsWhenResponsesAreEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunAttempt() error = %v", err)
 	}
-	if result.Session.ThreadID != "thread-1" {
-		t.Fatalf("ThreadID = %q, want thread-1", result.Session.ThreadID)
+	if result.Session.ConversationID != "thread-1" {
+		t.Fatalf("ConversationID = %q, want thread-1", result.Session.ConversationID)
 	}
 	if result.Session.TurnID != "turn-1" {
 		t.Fatalf("TurnID = %q, want turn-1", result.Session.TurnID)
@@ -243,8 +234,8 @@ func TestRunnerUsesStartedNotificationsWithoutResponses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunAttempt() error = %v", err)
 	}
-	if result.Session.ThreadID != "thread-1" {
-		t.Fatalf("ThreadID = %q, want thread-1", result.Session.ThreadID)
+	if result.Session.ConversationID != "thread-1" {
+		t.Fatalf("ConversationID = %q, want thread-1", result.Session.ConversationID)
 	}
 	if result.Session.TurnID != "turn-1" {
 		t.Fatalf("TurnID = %q, want turn-1", result.Session.TurnID)
@@ -300,7 +291,7 @@ done
 	return path
 }
 
-func containsTranscriptEntry(entries []transcriptEntry, direction, channel, snippet string) bool {
+func containsTranscriptEntry(entries []domain.PromptTranscriptEntry, direction, channel, snippet string) bool {
 	for _, entry := range entries {
 		if entry.Direction == direction && entry.Channel == channel && strings.Contains(entry.Payload, snippet) {
 			return true

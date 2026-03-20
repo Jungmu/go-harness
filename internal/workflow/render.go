@@ -56,7 +56,7 @@ func RenderPrompt(template string, issue domain.Issue, attempt int) (string, err
 
 func RenderContinuationPrompt(issue domain.Issue, turnCount int) string {
 	return strings.TrimSpace(fmt.Sprintf(`
-Continue working on the same issue in the existing Codex thread and workspace.
+Continue working on the same issue in the existing agent conversation and workspace.
 
 - Issue: %s
 - Tracker state: %s

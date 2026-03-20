@@ -13,46 +13,18 @@ import (
 	"sync"
 	"time"
 
+	"go-harness/internal/agent"
 	"go-harness/internal/config"
 	"go-harness/internal/domain"
 )
+
+const providerName = "codex"
 
 const (
 	initializeID  = 1
 	threadStartID = 2
 	turnStartID   = 3
 )
-
-type Event struct {
-	Type           string
-	At             time.Time
-	Message        string
-	PayloadSummary string
-	SessionID      string
-	ThreadID       string
-	TurnID         string
-	AppServerPID   int
-	TurnCount      int
-	Usage          domain.RuntimeTotals
-	RateLimit      *domain.RateLimitSnapshot
-}
-
-type ContinueDecision struct {
-	Continue       bool
-	NextPrompt     string
-	StopReason     string
-	RefreshedIssue *domain.Issue
-}
-
-type ContinueFunc func(ctx context.Context, session domain.LiveSession) (ContinueDecision, error)
-
-type RunResult struct {
-	Session        domain.LiveSession
-	Totals         domain.RuntimeTotals
-	RateLimits     map[string]domain.RateLimitSnapshot
-	StopReason     string
-	RefreshedIssue *domain.Issue
-}
 
 type Runner struct {
 	cfg     config.CodexConfig
@@ -76,25 +48,25 @@ type appSession struct {
 	workspacePath string
 	appServerPID  int
 	nextRequestID int
-	recorder      *transcriptRecorder
+	recorder      *agent.TranscriptRecorder
 }
 
 func NewRunner(cfg config.CodexConfig, logging config.LoggingConfig, logger *slog.Logger) *Runner {
 	return &Runner{cfg: cfg, logging: logging, logger: logger}
 }
 
-func (r *Runner) RunAttempt(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(Event), continueFn ContinueFunc) (RunResult, error) {
+func (r *Runner) RunAttempt(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	recorder := newTranscriptRecorder(r.logging.CapturePrompts, issue, workspace, attempt, r.logger)
+	recorder := agent.NewTranscriptRecorder(r.logging.CapturePrompts, providerName, issue, workspace, attempt, r.logger)
 	session, err := r.startSession(runCtx, workspace, recorder, onEvent)
 	if err != nil {
-		return RunResult{}, err
+		return agent.RunResult{}, err
 	}
 	defer session.close()
 
-	result := RunResult{
+	result := agent.RunResult{
 		RateLimits: map[string]domain.RateLimitSnapshot{},
 	}
 
@@ -104,7 +76,7 @@ func (r *Runner) RunAttempt(ctx context.Context, issue domain.Issue, workspace d
 	for {
 		liveSession, err := r.runTurn(runCtx, session, issue, currentPrompt, turnCount, &result, onEvent)
 		if err != nil {
-			return RunResult{}, err
+			return agent.RunResult{}, err
 		}
 		result.Session = liveSession
 
@@ -114,7 +86,7 @@ func (r *Runner) RunAttempt(ctx context.Context, issue domain.Issue, workspace d
 
 		decision, err := continueFn(runCtx, liveSession)
 		if err != nil {
-			return RunResult{}, err
+			return agent.RunResult{}, err
 		}
 		result.RefreshedIssue = decision.RefreshedIssue
 		result.StopReason = decision.StopReason
@@ -127,7 +99,7 @@ func (r *Runner) RunAttempt(ctx context.Context, issue domain.Issue, workspace d
 	}
 }
 
-func (r *Runner) startSession(ctx context.Context, workspace domain.Workspace, recorder *transcriptRecorder, onEvent func(Event)) (*appSession, error) {
+func (r *Runner) startSession(ctx context.Context, workspace domain.Workspace, recorder *agent.TranscriptRecorder, onEvent func(agent.Event)) (*appSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	workspacePath := workspace.Path
 
@@ -232,7 +204,7 @@ func (r *Runner) startSession(ctx context.Context, workspace domain.Workspace, r
 	return session, nil
 }
 
-func (r *Runner) runTurn(ctx context.Context, session *appSession, issue domain.Issue, prompt string, turnCount int, result *RunResult, onEvent func(Event)) (domain.LiveSession, error) {
+func (r *Runner) runTurn(ctx context.Context, session *appSession, issue domain.Issue, prompt string, turnCount int, result *agent.RunResult, onEvent func(agent.Event)) (domain.LiveSession, error) {
 	requestID := session.nextRequestID
 	session.nextRequestID++
 
@@ -263,27 +235,29 @@ func (r *Runner) runTurn(ctx context.Context, session *appSession, issue domain.
 	}
 
 	liveSession := domain.LiveSession{
-		SessionID:    domain.FormatSessionID(session.threadID, turnID),
-		ThreadID:     session.threadID,
-		TurnID:       turnID,
-		StartedAt:    time.Now().UTC(),
-		TurnCount:    turnCount,
-		AppServerPID: session.appServerPID,
+		Provider:       providerName,
+		SessionID:      domain.FormatSessionID(session.threadID, turnID),
+		ConversationID: session.threadID,
+		TurnID:         turnID,
+		StartedAt:      time.Now().UTC(),
+		TurnCount:      turnCount,
+		RuntimePID:     session.appServerPID,
 	}
 
 	eventType := "session_started"
 	if turnCount > 1 {
 		eventType = "turn_started"
 	}
-	emit(onEvent, Event{
-		Type:         eventType,
-		At:           liveSession.StartedAt,
-		SessionID:    liveSession.SessionID,
-		ThreadID:     liveSession.ThreadID,
-		TurnID:       liveSession.TurnID,
-		AppServerPID: liveSession.AppServerPID,
-		TurnCount:    turnCount,
-		Message:      "turn started",
+	emit(onEvent, agent.Event{
+		Provider:       providerName,
+		Type:           eventType,
+		At:             liveSession.StartedAt,
+		SessionID:      liveSession.SessionID,
+		ConversationID: liveSession.ConversationID,
+		TurnID:         liveSession.TurnID,
+		RuntimePID:     liveSession.RuntimePID,
+		TurnCount:      turnCount,
+		Message:        "turn started",
 	})
 
 	turnTimer := time.NewTimer(r.cfg.TurnTimeout)
@@ -319,15 +293,16 @@ func (r *Runner) runTurn(ctx context.Context, session *appSession, issue domain.
 			session.recorder.RecordIO("recv", line.source, line.text, liveSession, turnCount)
 
 			if line.source == "stderr" {
-				emit(onEvent, Event{
+				emit(onEvent, agent.Event{
+					Provider:       providerName,
 					Type:           "stderr",
 					At:             time.Now().UTC(),
 					Message:        line.text,
 					PayloadSummary: truncate(line.text, 200),
 					SessionID:      liveSession.SessionID,
-					ThreadID:       liveSession.ThreadID,
+					ConversationID: liveSession.ConversationID,
 					TurnID:         liveSession.TurnID,
-					AppServerPID:   liveSession.AppServerPID,
+					RuntimePID:     liveSession.RuntimePID,
 					TurnCount:      turnCount,
 				})
 				continue
@@ -335,15 +310,16 @@ func (r *Runner) runTurn(ctx context.Context, session *appSession, issue domain.
 
 			payload, err := decodeLine(line.text)
 			if err != nil {
-				emit(onEvent, Event{
+				emit(onEvent, agent.Event{
+					Provider:       providerName,
 					Type:           "malformed",
 					At:             time.Now().UTC(),
 					Message:        err.Error(),
 					PayloadSummary: truncate(line.text, 200),
 					SessionID:      liveSession.SessionID,
-					ThreadID:       liveSession.ThreadID,
+					ConversationID: liveSession.ConversationID,
 					TurnID:         liveSession.TurnID,
-					AppServerPID:   liveSession.AppServerPID,
+					RuntimePID:     liveSession.RuntimePID,
 					TurnCount:      turnCount,
 				})
 				continue
@@ -381,7 +357,7 @@ func (r *Runner) runTurn(ctx context.Context, session *appSession, issue domain.
 	}
 }
 
-func (r *Runner) awaitResponse(ctx context.Context, session *appSession, id, turnCount int, onEvent func(Event)) (map[string]any, error) {
+func (r *Runner) awaitResponse(ctx context.Context, session *appSession, id, turnCount int, onEvent func(agent.Event)) (map[string]any, error) {
 	timer := time.NewTimer(r.cfg.ReadTimeout)
 	defer timer.Stop()
 
@@ -408,13 +384,13 @@ func (r *Runner) awaitResponse(ctx context.Context, session *appSession, id, tur
 			}
 			session.recorder.RecordIO("recv", line.source, line.text, session.trace(""), turnCount)
 			if line.source == "stderr" {
-				emit(onEvent, Event{Type: "stderr", At: time.Now().UTC(), Message: line.text, PayloadSummary: truncate(line.text, 200)})
+				emit(onEvent, agent.Event{Provider: providerName, Type: "stderr", At: time.Now().UTC(), Message: line.text, PayloadSummary: truncate(line.text, 200)})
 				continue
 			}
 
 			payload, err := decodeLine(line.text)
 			if err != nil {
-				emit(onEvent, Event{Type: "malformed", At: time.Now().UTC(), Message: err.Error(), PayloadSummary: truncate(line.text, 200)})
+				emit(onEvent, agent.Event{Provider: providerName, Type: "malformed", At: time.Now().UTC(), Message: err.Error(), PayloadSummary: truncate(line.text, 200)})
 				continue
 			}
 			if intField(payload, "id") == id {
@@ -425,7 +401,8 @@ func (r *Runner) awaitResponse(ctx context.Context, session *appSession, id, tur
 			if intField(payload, "id") == id {
 				return mapField(payload, "result"), nil
 			}
-			emit(onEvent, Event{
+			emit(onEvent, agent.Event{
+				Provider:       providerName,
 				Type:           "startup_notification",
 				At:             time.Now().UTC(),
 				PayloadSummary: truncate(line.text, 200),
@@ -434,7 +411,7 @@ func (r *Runner) awaitResponse(ctx context.Context, session *appSession, id, tur
 	}
 }
 
-func (r *Runner) awaitStarted(ctx context.Context, session *appSession, responseID int, notificationMethod, entityKey string, turnCount int, onEvent func(Event)) (string, error) {
+func (r *Runner) awaitStarted(ctx context.Context, session *appSession, responseID int, notificationMethod, entityKey string, turnCount int, onEvent func(agent.Event)) (string, error) {
 	timer := time.NewTimer(r.cfg.ReadTimeout)
 	defer timer.Stop()
 
@@ -472,14 +449,14 @@ func (r *Runner) awaitStarted(ctx context.Context, session *appSession, response
 			session.recorder.RecordIO("recv", line.source, line.text, session.trace(""), turnCount)
 			if line.source == "stderr" {
 				lastSummary = truncate(line.text, 200)
-				emit(onEvent, Event{Type: "stderr", At: time.Now().UTC(), Message: line.text, PayloadSummary: truncate(line.text, 200)})
+				emit(onEvent, agent.Event{Provider: providerName, Type: "stderr", At: time.Now().UTC(), Message: line.text, PayloadSummary: truncate(line.text, 200)})
 				continue
 			}
 
 			payload, err := decodeLine(line.text)
 			if err != nil {
 				lastSummary = truncate(line.text, 200)
-				emit(onEvent, Event{Type: "malformed", At: time.Now().UTC(), Message: err.Error(), PayloadSummary: truncate(line.text, 200)})
+				emit(onEvent, agent.Event{Provider: providerName, Type: "malformed", At: time.Now().UTC(), Message: err.Error(), PayloadSummary: truncate(line.text, 200)})
 				continue
 			}
 
@@ -501,7 +478,8 @@ func (r *Runner) awaitStarted(ctx context.Context, session *appSession, response
 			}
 
 			lastSummary = truncate(line.text, 200)
-			emit(onEvent, Event{
+			emit(onEvent, agent.Event{
+				Provider:       providerName,
 				Type:           "startup_notification",
 				At:             time.Now().UTC(),
 				PayloadSummary: truncate(line.text, 200),
@@ -510,7 +488,7 @@ func (r *Runner) awaitStarted(ctx context.Context, session *appSession, response
 	}
 }
 
-func (r *Runner) handleProtocolMethod(app *appSession, payload map[string]any, session domain.LiveSession, turnCount int, onEvent func(Event)) (bool, error) {
+func (r *Runner) handleProtocolMethod(app *appSession, payload map[string]any, session domain.LiveSession, turnCount int, onEvent func(agent.Event)) (bool, error) {
 	method := stringField(payload, "method")
 
 	switch method {
@@ -566,16 +544,17 @@ func (r *Runner) handleProtocolMethod(app *appSession, payload map[string]any, s
 	}
 }
 
-func (r *Runner) makeEvent(eventType string, payload map[string]any, session domain.LiveSession, turnCount int) Event {
-	event := Event{
+func (r *Runner) makeEvent(eventType string, payload map[string]any, session domain.LiveSession, turnCount int) agent.Event {
+	event := agent.Event{
+		Provider:       providerName,
 		Type:           eventType,
 		At:             time.Now().UTC(),
 		Message:        stringField(payload, "method"),
 		PayloadSummary: truncate(payloadSummary(payload), 240),
 		SessionID:      session.SessionID,
-		ThreadID:       session.ThreadID,
+		ConversationID: session.ConversationID,
 		TurnID:         session.TurnID,
-		AppServerPID:   session.AppServerPID,
+		RuntimePID:     session.RuntimePID,
 		TurnCount:      turnCount,
 	}
 	if usage, ok := usageFromPayload(payload); ok {
@@ -587,7 +566,7 @@ func (r *Runner) makeEvent(eventType string, payload map[string]any, session dom
 	return event
 }
 
-func applyUsageAndRateLimits(payload map[string]any, result *RunResult) {
+func applyUsageAndRateLimits(payload map[string]any, result *agent.RunResult) {
 	if usage, ok := usageFromPayload(payload); ok {
 		result.Totals = usage
 		result.Session.InputTokens = usage.InputTokens
@@ -672,11 +651,12 @@ func pumpLines(source string, reader io.Reader, lines chan<- streamLine, wg *syn
 
 func (s *appSession) trace(turnID string) domain.LiveSession {
 	session := domain.LiveSession{
-		ThreadID:     s.threadID,
-		TurnID:       turnID,
-		AppServerPID: s.appServerPID,
+		Provider:       providerName,
+		ConversationID: s.threadID,
+		TurnID:         turnID,
+		RuntimePID:     s.appServerPID,
 	}
-	session.SessionID = domain.FormatSessionID(session.ThreadID, session.TurnID)
+	session.SessionID = domain.FormatSessionID(session.ConversationID, session.TurnID)
 	return session
 }
 
@@ -707,7 +687,7 @@ func decodeLine(line string) (map[string]any, error) {
 	return payload, nil
 }
 
-func emit(onEvent func(Event), event Event) {
+func emit(onEvent func(agent.Event), event agent.Event) {
 	if onEvent != nil {
 		onEvent(event)
 	}
