@@ -83,7 +83,7 @@ func (r *Runner) runTurn(ctx context.Context, workspace domain.Workspace, issue 
 		return domain.LiveSession{}, fmt.Errorf("claude command is empty")
 	}
 
-	args := []string{"-p", "--output-format", "stream-json", "--permission-mode", r.cfg.PermissionMode}
+	args := []string{"-p", "--verbose", "--output-format", "stream-json", "--permission-mode", r.cfg.PermissionMode}
 	if conversationID != "" {
 		args = append(args, "-r", conversationID)
 	}

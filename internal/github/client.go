@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"go-harness/internal/config"
 	"go-harness/internal/domain"
@@ -26,6 +28,25 @@ type Client struct {
 type pullRequestResponse struct {
 	Number  int    `json:"number"`
 	HTMLURL string `json:"html_url"`
+}
+
+type GitHubAPIError struct {
+	StatusCode int
+	Message    string
+	Errors     []GitHubAPIErrorDetail
+}
+
+type GitHubAPIErrorDetail struct {
+	Resource string
+	Field    string
+	Code     string
+	Message  string
+}
+
+var pullRequestCreateRetryDelays = []time.Duration{
+	250 * time.Millisecond,
+	500 * time.Millisecond,
+	1 * time.Second,
 }
 
 func NewClient(httpClient *http.Client, cfg config.GitHubConfig) *Client {
@@ -67,11 +88,10 @@ func (c *Client) EnsurePullRequest(ctx context.Context, issue domain.Issue, work
 		return pullRequest, nil
 	}
 
-	pullRequest, err := c.createPullRequest(ctx, issue, headBranch)
+	pullRequest, err := c.createOrReusePullRequest(ctx, issue, headBranch)
 	if err != nil {
 		return domain.PullRequest{}, err
 	}
-	pullRequest.Created = true
 	return pullRequest, nil
 }
 
@@ -203,6 +223,26 @@ func (c *Client) createPullRequest(ctx context.Context, issue domain.Issue, head
 	}, nil
 }
 
+func (c *Client) createOrReusePullRequest(ctx context.Context, issue domain.Issue, headBranch string) (domain.PullRequest, error) {
+	for attempt := 0; ; attempt++ {
+		pullRequest, err := c.createPullRequest(ctx, issue, headBranch)
+		if err == nil {
+			pullRequest.Created = true
+			return pullRequest, nil
+		}
+		if existing, ok, findErr := c.findOpenPullRequest(ctx, headBranch); findErr == nil && ok {
+			existing.Created = false
+			return existing, nil
+		}
+		if attempt >= len(pullRequestCreateRetryDelays) || !shouldRetryPullRequestCreate(err) {
+			return domain.PullRequest{}, err
+		}
+		if err := sleepWithContext(ctx, pullRequestCreateRetryDelays[attempt]); err != nil {
+			return domain.PullRequest{}, err
+		}
+	}
+}
+
 func prTitle(issue domain.Issue, headBranch string) string {
 	switch {
 	case strings.TrimSpace(issue.Identifier) != "" && strings.TrimSpace(issue.Title) != "":
@@ -297,28 +337,97 @@ func decodeGitHubAPIError(statusCode int, raw []byte) error {
 	var payload struct {
 		Message string `json:"message"`
 		Errors  []struct {
-			Message string `json:"message"`
+			Resource string `json:"resource"`
+			Field    string `json:"field"`
+			Code     string `json:"code"`
+			Message  string `json:"message"`
 		} `json:"errors"`
 	}
 	if err := json.Unmarshal(raw, &payload); err == nil {
-		parts := make([]string, 0, len(payload.Errors)+1)
-		if strings.TrimSpace(payload.Message) != "" {
-			parts = append(parts, strings.TrimSpace(payload.Message))
+		apiErr := &GitHubAPIError{
+			StatusCode: statusCode,
+			Message:    strings.TrimSpace(payload.Message),
+			Errors:     make([]GitHubAPIErrorDetail, 0, len(payload.Errors)),
 		}
 		for _, item := range payload.Errors {
-			if strings.TrimSpace(item.Message) != "" {
-				parts = append(parts, strings.TrimSpace(item.Message))
-			}
+			apiErr.Errors = append(apiErr.Errors, GitHubAPIErrorDetail{
+				Resource: strings.TrimSpace(item.Resource),
+				Field:    strings.TrimSpace(item.Field),
+				Code:     strings.TrimSpace(item.Code),
+				Message:  strings.TrimSpace(item.Message),
+			})
 		}
-		if len(parts) > 0 {
-			return fmt.Errorf("github api status %d: %s", statusCode, strings.Join(parts, "; "))
+		if apiErr.Message != "" || len(apiErr.Errors) > 0 {
+			return apiErr
 		}
 	}
 	message := strings.TrimSpace(string(raw))
 	if len(message) > 512 {
 		message = message[:512]
 	}
-	return fmt.Errorf("github api status %d: %s", statusCode, message)
+	return &GitHubAPIError{StatusCode: statusCode, Message: message}
+}
+
+func (e *GitHubAPIError) Error() string {
+	if e == nil {
+		return ""
+	}
+	parts := make([]string, 0, len(e.Errors)+1)
+	if e.Message != "" {
+		parts = append(parts, e.Message)
+	}
+	for _, item := range e.Errors {
+		details := make([]string, 0, 4)
+		if item.Resource != "" {
+			details = append(details, item.Resource)
+		}
+		if item.Field != "" {
+			details = append(details, item.Field)
+		}
+		if item.Code != "" {
+			details = append(details, item.Code)
+		}
+		if item.Message != "" {
+			details = append(details, item.Message)
+		}
+		if len(details) > 0 {
+			parts = append(parts, strings.Join(details, " "))
+		}
+	}
+	if len(parts) == 0 {
+		return fmt.Sprintf("github api status %d", e.StatusCode)
+	}
+	return fmt.Errorf("github api status %d: %s", e.StatusCode, strings.Join(parts, "; ")).Error()
+}
+
+func shouldRetryPullRequestCreate(err error) bool {
+	var apiErr *GitHubAPIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnprocessableEntity {
+		return false
+	}
+	for _, item := range apiErr.Errors {
+		if strings.EqualFold(item.Resource, "PullRequest") && strings.EqualFold(item.Field, "head") && strings.EqualFold(item.Code, "invalid") {
+			return true
+		}
+		if strings.EqualFold(item.Resource, "PullRequest") && strings.Contains(strings.ToLower(item.Message), "already exists") {
+			return true
+		}
+	}
+	return strings.Contains(strings.ToLower(apiErr.Message), "head invalid")
+}
+
+func sleepWithContext(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func isHTTPRemote(remote string) bool {

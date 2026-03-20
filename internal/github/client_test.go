@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"go-harness/internal/config"
 	"go-harness/internal/domain"
@@ -246,6 +247,193 @@ func TestEnsurePullRequestIgnoresHarnessArtifactsButRejectsOtherDirtyFiles(t *te
 	}
 	if !strings.Contains(err.Error(), "dirty.txt") {
 		t.Fatalf("error = %v, want dirty.txt to be reported", err)
+	}
+}
+
+func TestEnsurePullRequestReturnsDetailedGitHubValidationErrors(t *testing.T) {
+	remotePath, workspacePath := setupGitWorkspace(t)
+	commitFile(t, workspacePath, "feature.txt", "hello\n", "feature commit")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/repos/acme/widgets/pulls":
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/repos/acme/widgets/pulls":
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"message": "Validation Failed",
+				"errors": []map[string]any{
+					{
+						"resource": "PullRequest",
+						"field":    "base",
+						"code":     "invalid",
+						"message":  "No commits between main and feature/ABC-1",
+					},
+				},
+			})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.Client(), config.GitHubConfig{
+		Endpoint:   server.URL + "/api/v3",
+		Token:      "github-token",
+		Owner:      "acme",
+		Repo:       "widgets",
+		BaseBranch: "main",
+		RemoteURL:  remotePath,
+	})
+	_, err := client.EnsurePullRequest(context.Background(), domain.Issue{
+		Identifier: "ABC-1",
+		Title:      "Example issue",
+		BranchName: "feature/ABC-1",
+	}, domain.Workspace{Path: workspacePath})
+	if err == nil {
+		t.Fatal("EnsurePullRequest() error = nil, want github validation error")
+	}
+	for _, want := range []string{
+		"Validation Failed",
+		"PullRequest",
+		"base",
+		"invalid",
+		"No commits between main and feature/ABC-1",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want %q", err, want)
+		}
+	}
+}
+
+func TestEnsurePullRequestRetriesTransientHeadInvalidError(t *testing.T) {
+	remotePath, workspacePath := setupGitWorkspace(t)
+	commitFile(t, workspacePath, "feature.txt", "hello\n", "feature commit")
+
+	originalDelays := pullRequestCreateRetryDelays
+	pullRequestCreateRetryDelays = []time.Duration{0}
+	t.Cleanup(func() {
+		pullRequestCreateRetryDelays = originalDelays
+	})
+
+	var createCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/repos/acme/widgets/pulls":
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/repos/acme/widgets/pulls":
+			if createCalls.Add(1) == 1 {
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"message": "Validation Failed",
+					"errors": []map[string]any{
+						{
+							"resource": "PullRequest",
+							"field":    "head",
+							"code":     "invalid",
+						},
+					},
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"number":   29,
+				"html_url": "https://github.example.com/acme/widgets/pull/29",
+			})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.Client(), config.GitHubConfig{
+		Endpoint:   server.URL + "/api/v3",
+		Token:      "github-token",
+		Owner:      "acme",
+		Repo:       "widgets",
+		BaseBranch: "main",
+		RemoteURL:  remotePath,
+	})
+	pullRequest, err := client.EnsurePullRequest(context.Background(), domain.Issue{
+		Identifier: "ABC-1",
+		Title:      "Example issue",
+		BranchName: "feature/ABC-1",
+	}, domain.Workspace{Path: workspacePath})
+	if err != nil {
+		t.Fatalf("EnsurePullRequest() error = %v", err)
+	}
+	if !pullRequest.Created {
+		t.Fatal("Created = false, want true after transient retry")
+	}
+	if pullRequest.Number != 29 {
+		t.Fatalf("Number = %d, want 29", pullRequest.Number)
+	}
+	if createCalls.Load() != 2 {
+		t.Fatalf("createCalls = %d, want 2", createCalls.Load())
+	}
+}
+
+func TestEnsurePullRequestReusesOpenPRWhenCreateReportsDuplicate(t *testing.T) {
+	remotePath, workspacePath := setupGitWorkspace(t)
+	commitFile(t, workspacePath, "feature.txt", "hello\n", "feature commit")
+
+	originalDelays := pullRequestCreateRetryDelays
+	pullRequestCreateRetryDelays = []time.Duration{0}
+	t.Cleanup(func() {
+		pullRequestCreateRetryDelays = originalDelays
+	})
+
+	var getCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/repos/acme/widgets/pulls":
+			if getCalls.Add(1) == 1 {
+				_ = json.NewEncoder(w).Encode([]map[string]any{})
+				return
+			}
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"number":   31,
+				"html_url": "https://github.example.com/acme/widgets/pull/31",
+			}})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/repos/acme/widgets/pulls":
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"message": "Validation Failed",
+				"errors": []map[string]any{
+					{
+						"resource": "PullRequest",
+						"code":     "custom",
+						"message":  "A pull request already exists for acme:feature/ABC-1.",
+					},
+				},
+			})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.Client(), config.GitHubConfig{
+		Endpoint:   server.URL + "/api/v3",
+		Token:      "github-token",
+		Owner:      "acme",
+		Repo:       "widgets",
+		BaseBranch: "main",
+		RemoteURL:  remotePath,
+	})
+	pullRequest, err := client.EnsurePullRequest(context.Background(), domain.Issue{
+		Identifier: "ABC-1",
+		Title:      "Example issue",
+		BranchName: "feature/ABC-1",
+	}, domain.Workspace{Path: workspacePath})
+	if err != nil {
+		t.Fatalf("EnsurePullRequest() error = %v", err)
+	}
+	if pullRequest.Created {
+		t.Fatal("Created = true, want false when reusing existing PR")
+	}
+	if pullRequest.Number != 31 {
+		t.Fatalf("Number = %d, want 31", pullRequest.Number)
 	}
 }
 
