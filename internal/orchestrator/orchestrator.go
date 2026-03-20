@@ -861,7 +861,8 @@ func (o *Orchestrator) executeAttempt(ctx context.Context, issue domain.Issue, a
 	// agent and only move to done if both agree. The second verdict file is left in
 	// place for completeIssueIfNeeded to consume via the normal loadReviewVerdict path.
 	if err == nil && o.reviewMode {
-		if firstVerdict, peekErr := peekReviewVerdict(workspace); peekErr == nil && firstVerdict.Decision == reviewDecisionDone {
+		if firstVerdict, peekErr := peekReviewVerdict(workspace); peekErr == nil && firstVerdict.Decision == reviewDecisionDone &&
+			validateReviewVerdict(firstVerdict) == nil && validateReviewNotes(workspace) == nil {
 			o.pushEvent(timelineUpdate{
 				IssueID:    runIssue.ID,
 				Identifier: runIssue.Identifier,

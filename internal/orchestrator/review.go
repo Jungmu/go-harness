@@ -37,11 +37,12 @@ func prepareReviewArtifacts(workspace domain.Workspace) error {
 	if err := os.MkdirAll(reviewArtifactsDir(workspace), 0o755); err != nil {
 		return err
 	}
-	err := os.Remove(reviewResultPath(workspace))
-	if err == nil || os.IsNotExist(err) {
-		return nil
+	for _, path := range []string{reviewResultPath(workspace), reviewNotesPath(workspace)} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
-	return err
+	return nil
 }
 
 // peekReviewVerdict reads the current verdict file without deleting it.
