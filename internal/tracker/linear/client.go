@@ -733,14 +733,15 @@ func bestWorkflowState(states []workflowState, keep func(workflowState) bool) *w
 }
 
 func normalizeIssue(raw map[string]any) domain.Issue {
+	identifier := stringField(raw, "identifier")
 	return domain.Issue{
 		ID:          stringField(raw, "id"),
-		Identifier:  stringField(raw, "identifier"),
+		Identifier:  identifier,
 		Title:       stringField(raw, "title"),
 		Description: stringField(raw, "description"),
 		Priority:    intField(raw, "priority"),
 		State:       stringField(mapField(raw, "state"), "name"),
-		BranchName:  stringField(raw, "branchName"),
+		BranchName:  domain.NormalizeBranchName(stringField(raw, "branchName"), identifier),
 		URL:         stringField(raw, "url"),
 		Labels:      extractLabels(mapField(raw, "labels")),
 		BlockedBy:   extractBlockers(mapField(raw, "inverseRelations")),

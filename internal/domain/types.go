@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 var invalidWorkspaceChar = regexp.MustCompile(`[^A-Za-z0-9._-]`)
@@ -226,6 +228,66 @@ func SanitizeWorkspaceKey(identifier string) string {
 	}
 
 	return sanitized
+}
+
+func NormalizeBranchName(raw, identifier string) string {
+	fallback := branchSlug(identifier)
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fallback
+	}
+
+	parts := strings.Split(raw, "/")
+	normalized := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if slug := branchSlug(part); slug != "" {
+			normalized = append(normalized, slug)
+		}
+	}
+	if len(normalized) == 0 {
+		return fallback
+	}
+	return strings.Join(normalized, "/")
+}
+
+func branchSlug(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+
+	var builder strings.Builder
+	builder.Grow(len(value))
+	lastHyphen := false
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			builder.WriteRune(r)
+			lastHyphen = false
+		case r >= 'A' && r <= 'Z':
+			builder.WriteRune(unicode.ToLower(r))
+			lastHyphen = false
+		case r >= '0' && r <= '9':
+			builder.WriteRune(r)
+			lastHyphen = false
+		case r == '-' || r == '_' || r == '.' || unicode.IsSpace(r):
+			if builder.Len() > 0 && !lastHyphen {
+				builder.WriteByte('-')
+				lastHyphen = true
+			}
+		case r < utf8.RuneSelf:
+			if builder.Len() > 0 && !lastHyphen {
+				builder.WriteByte('-')
+				lastHyphen = true
+			}
+		default:
+			if builder.Len() > 0 && !lastHyphen {
+				builder.WriteByte('-')
+				lastHyphen = true
+			}
+		}
+	}
+	return strings.Trim(builder.String(), "-")
 }
 
 func FormatSessionID(conversationID, turnID string) string {

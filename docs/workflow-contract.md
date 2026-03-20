@@ -109,6 +109,7 @@ The current renderer supports:
 - `{{ issue.priority }}`
 - `{{ issue.state }}`
 - `{{ issue.branch_name }}`
+  - The runtime normalizes tracker branch metadata into an ASCII-safe slash-separated branch slug before rendering it.
 - `{{ issue.url }}`
 - `{{ issue.labels }}`
 - `{{ issue.blocked_by }}`
@@ -160,6 +161,7 @@ Unknown variables and filters return `workflow_template_render_error`.
 - If the refreshed issue is still active and the current turn count has reached `agent.max_turns`, the run stops and the orchestrator transitions the issue to `In Review`.
 - Before the runtime transitions an issue to `Done`, it pushes the current workspace `HEAD` to the issue branch and creates or reuses a GitHub pull request.
 - The GitHub handoff push treats the issue branch as harness-managed state and may replace older remote issue-branch history on retry.
+- Tracker-provided or synthesized branch names are normalized to ASCII-safe slugs so harness-managed issue branches stay CLI- and GitHub-friendly.
 - GitHub PR creation requires a clean git worktree other than `.harness/*` runtime artifacts such as review files, tool caches, and scratch output.
 - If GitHub PR creation fails, the attempt follows the normal retry path and the issue does not move to `Done`.
 - If `.harness/review-notes.md` exists in a coding workspace, the runtime appends an internal prompt suffix telling the coding lane to read it first.

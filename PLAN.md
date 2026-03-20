@@ -157,7 +157,7 @@ trusted environment 전제를 두더라도 path validation, scope narrowing, tim
 기본값 적용, `$VAR` 해석, 경로 정규화, 런타임 검증, last-known-good 유지, reload 적용을 담당한다.
 
 3. Tracker Adapter
-candidate issue 조회, issue 상태 재조회, normalized issue model 제공, agent-facing write tool의 서버측 실행을 담당한다.
+candidate issue 조회, issue 상태 재조회, ASCII-safe branch slug를 포함한 normalized issue model 제공, agent-facing write tool의 서버측 실행을 담당한다.
 
 4. GitHub Integration
 workspace git 상태 확인, configured token 또는 GitHub CLI credential 로드, issue branch push, GitHub PR 생성 또는 open PR 재사용을 담당한다.

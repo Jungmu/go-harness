@@ -205,7 +205,7 @@ func (c *Client) createPullRequest(ctx context.Context, issue domain.Issue, head
 
 	payload := map[string]any{
 		"title": prTitle(issue, headBranch),
-		"head":  headBranch,
+		"head":  c.cfg.Owner + ":" + headBranch,
 		"base":  c.cfg.BaseBranch,
 		"body":  prBody(issue),
 		"draft": c.cfg.DraftPullRequest,

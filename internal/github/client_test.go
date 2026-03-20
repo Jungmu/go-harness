@@ -38,8 +38,8 @@ func TestEnsurePullRequestCreatesAndPushesBranch(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				t.Fatalf("decode payload: %v", err)
 			}
-			if payload["head"] != "feature/ABC-1" {
-				t.Fatalf("payload head = %#v", payload["head"])
+			if payload["head"] != "acme:feature/ABC-1" {
+				t.Fatalf("payload head = %q, want acme:feature/ABC-1", payload["head"])
 			}
 			if payload["base"] != "main" {
 				t.Fatalf("payload base = %#v", payload["base"])

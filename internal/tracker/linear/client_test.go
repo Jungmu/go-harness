@@ -87,6 +87,9 @@ func TestClientPollCandidatesAndFetchByIDs(t *testing.T) {
 	if got := issues[0].Labels; len(got) != 1 || got[0] != "backend" {
 		t.Fatalf("labels = %#v", got)
 	}
+	if got := issues[0].BranchName; got != "feature/test" {
+		t.Fatalf("branch name = %q, want feature/test", got)
+	}
 	if issues[0].CreatedAt.IsZero() || issues[0].UpdatedAt.IsZero() {
 		t.Fatalf("timestamps were not parsed: %#v", issues[0])
 	}
@@ -97,6 +100,64 @@ func TestClientPollCandidatesAndFetchByIDs(t *testing.T) {
 	}
 	if len(refreshed) != 1 || refreshed[0].Identifier != "ABC-2" {
 		t.Fatalf("FetchByIDs() = %#v", refreshed)
+	}
+}
+
+func TestClientNormalizesBranchNamesToASCII(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload graphqlRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+
+		switch {
+		case strings.Contains(payload.Query, "projects(filter: {slugId: {eq: $projectRef}}"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"projects": map[string]any{
+						"nodes": []map[string]any{
+							{"slugId": "TEST", "name": "Test Project"},
+						},
+					},
+				},
+			})
+		default:
+			payload := sampleIssuePayload("JON-67")
+			payload["branchName"] = "whdrjs0/jon-67-코드-리뷰해서-리포트-작성하기"
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"issues": map[string]any{
+						"nodes": []map[string]any{payload},
+						"pageInfo": map[string]any{
+							"hasNextPage": false,
+							"endCursor":   "",
+						},
+					},
+				},
+			})
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.Client(), config.TrackerConfig{
+		Endpoint:       server.URL,
+		APIKey:         "token-123",
+		ProjectSlug:    "TEST",
+		ActiveStates:   []string{"Todo", "In Progress"},
+		TerminalStates: []string{"Done"},
+	})
+
+	issues, err := client.PollCandidates(context.Background())
+	if err != nil {
+		t.Fatalf("PollCandidates() error = %v", err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("PollCandidates() = %#v", issues)
+	}
+	if got := issues[0].BranchName; got != "whdrjs0/jon-67" {
+		t.Fatalf("branch name = %q, want whdrjs0/jon-67", got)
 	}
 }
 

@@ -155,6 +155,7 @@ Fields:
   - Current tracker state name.
 - `branch_name` (string or null)
   - Tracker-provided branch metadata if available.
+  - The Go harness normalizes it into an ASCII-safe slash-separated branch slug before prompt rendering and GitHub handoff.
 - `url` (string or null)
 - `labels` (list of strings)
   - Normalized to lowercase.

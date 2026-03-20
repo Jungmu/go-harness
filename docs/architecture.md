@@ -37,7 +37,7 @@ The current Go harness implements:
   - refreshes issues by ID
   - resolves workflow states and transitions issues to `In Progress` and `Done`
   - creates or updates one persistent `## Harness Progress` comment per issue
-  - normalizes Linear issue payloads
+  - normalizes Linear issue payloads, including ASCII-safe issue branch names for harness-managed git work
 - `internal/workspace`
   - derives sanitized workspace paths
   - enforces root-bound path safety
