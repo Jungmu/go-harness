@@ -747,6 +747,88 @@ func TestReviewOrchestratorConsensusFailurePreservesFirstAgentNotes(t *testing.T
 	}
 }
 
+func TestReviewOrchestratorSecondPassInvalidDoneIsHardFailure(t *testing.T) {
+	// When the first agent rejects and the second agent returns a decodable but
+	// invalid "done" verdict (e.g. empty summary), the attempt must fail hard
+	// (enter retrying state) rather than silently converting to a consensus todo.
+	cfg := loadReviewTestConfig(t)
+	issue := domain.Issue{ID: "1", Identifier: "ABC-1", Title: "Example", State: "In Review"}
+
+	tracker := &fakeTracker{
+		pollCandidates: func() []domain.Issue { return []domain.Issue{issue} },
+		fetchByIDs:     func(_ []string) []domain.Issue { return []domain.Issue{issue} },
+		transitionState: func(issue domain.Issue, stateName string) (domain.Issue, error) {
+			issue.State = stateName
+			return issue, nil
+		},
+	}
+	workspaceManager := &fakeWorkspaceManager{root: cfg.Workspace.Root}
+
+	var runCount atomic.Int32
+	runner := &fakeRunner{
+		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error) {
+			call := runCount.Add(1)
+			if err := os.MkdirAll(filepath.Dir(reviewNotesPath(workspace)), 0o755); err != nil {
+				t.Fatalf("MkdirAll() error = %v", err)
+			}
+			var verdict reviewVerdict
+			if call == 1 {
+				// First agent rejects with a valid todo verdict.
+				if err := os.WriteFile(reviewNotesPath(workspace), []byte("First agent notes: blocking issue found."), 0o644); err != nil {
+					t.Fatalf("WriteFile(notes) error = %v", err)
+				}
+				verdict = reviewVerdict{
+					Decision: reviewDecisionTodo,
+					Summary:  "Blocking issue found",
+					BlockingIssues: []reviewBlockingIssue{{
+						Title:  "Nil pointer",
+						Reason: "Result can be nil",
+						File:   "internal/orchestrator/orchestrator.go",
+					}},
+				}
+			} else {
+				// Second agent returns a "done" verdict with an empty summary —
+				// invalid per the review contract.
+				if err := os.WriteFile(reviewNotesPath(workspace), []byte("Second agent notes."), 0o644); err != nil {
+					t.Fatalf("WriteFile(notes) error = %v", err)
+				}
+				verdict = reviewVerdict{Decision: reviewDecisionDone, Summary: "", BlockingIssues: []reviewBlockingIssue{}}
+			}
+			raw, err := json.Marshal(verdict)
+			if err != nil {
+				t.Fatalf("Marshal(verdict) error = %v", err)
+			}
+			if err := os.WriteFile(reviewResultPath(workspace), raw, 0o644); err != nil {
+				t.Fatalf("WriteFile(verdict) error = %v", err)
+			}
+			return agent.RunResult{
+				Session: domain.LiveSession{SessionID: "review-thread-turn-1", ConversationID: "review-thread", TurnID: "turn-1"},
+			}, nil
+		},
+	}
+
+	orch := newTestOrchestrator(cfg, tracker, workspaceManager, runner, WithReviewMode())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := orch.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer func() {
+		_ = orch.Stop(context.Background())
+	}()
+
+	// The attempt must fail and enter the retry queue, not transition to Todo.
+	waitFor(t, func() bool { return orch.Snapshot().Counts.Retrying == 1 })
+
+	snapshot := orch.Snapshot()
+	if snapshot.Retrying[0].Identifier != "ABC-1" {
+		t.Fatalf("retrying = %#v", snapshot.Retrying)
+	}
+	if !containsTimelineEvent(snapshot.RecentActivity, "ABC-1", "attempt_failed") {
+		t.Fatalf("recent activity missing attempt_failed: %#v", snapshot.RecentActivity)
+	}
+}
+
 func TestReviewOrchestratorMovesIssueBackToTodoWithoutCleanup(t *testing.T) {
 	cfg := loadReviewTestConfig(t)
 	issue := domain.Issue{ID: "1", Identifier: "ABC-1", Title: "Example", State: "In Review"}

@@ -206,9 +206,9 @@ Review lane:
 
 - if `REVIEW-WORKFLOW.md` exists next to the active `WORKFLOW.md`, the daemon starts a review lane that polls `In Review` issues
 - the review lane inherits shared settings from the main workflow and applies only the overrides declared in `REVIEW-WORKFLOW.md`
-- the review lane runs one Codex turn per attempt and expects `.harness/review-result.json` plus `.harness/review-notes.md` in the issue workspace
-- a review verdict with `decision="done"` transitions the issue to `Done`
-- a review verdict with `decision="todo"` transitions the issue back to `Todo` and preserves the workspace
+- each review attempt runs two independent agent turns (passes); both must produce valid artifacts and agree on `decision="done"` before the issue moves to `Done`
+- a review verdict with `decision="done"` from both agents transitions the issue to `Done`
+- if either agent returns `decision="todo"`, or the agents disagree (first rejects, second approves), the issue moves back to `Todo` and the workspace is preserved with the rejecting agent's notes
 - invalid or missing review artifacts fail the attempt and use the normal retry policy
 
 Dispatch order:

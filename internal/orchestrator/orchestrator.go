@@ -896,14 +896,23 @@ func (o *Orchestrator) executeAttempt(ctx context.Context, issue domain.Issue, a
 					// Enforce consensus: if the first agent rejected, the final verdict
 					// must remain "todo" even if the second agent approved.
 					if firstVerdict.Decision == reviewDecisionTodo {
-						if secondVerdict, peekErr2 := peekReviewVerdict(workspace); peekErr2 == nil &&
-							secondVerdict.Decision == reviewDecisionDone {
-							err = writeConsensusFailureVerdict(workspace, firstVerdict)
-							// Restore the first agent's notes so follow-up runs get
-							// the rejecting reviewer's blocking guidance, not the
-							// approving second reviewer's notes.
-							if err == nil && len(firstReviewNotes) > 0 {
-								err = os.WriteFile(reviewNotesPath(workspace), firstReviewNotes, 0o644)
+						secondVerdict, peekErr2 := peekReviewVerdict(workspace)
+						if peekErr2 == nil && secondVerdict.Decision == reviewDecisionDone {
+							// Full validation of the second agent's done verdict before
+							// treating it as a consensus failure. An invalid done payload
+							// is a hard failure, not a silent consensus override.
+							if valErr := validateReviewVerdict(secondVerdict); valErr != nil {
+								err = fmt.Errorf("second review agent produced invalid done verdict: %w", valErr)
+							} else if valErr := validateReviewNotes(workspace); valErr != nil {
+								err = fmt.Errorf("second review agent produced invalid done verdict: %w", valErr)
+							} else {
+								err = writeConsensusFailureVerdict(workspace, firstVerdict)
+								// Restore the first agent's notes so follow-up runs get
+								// the rejecting reviewer's blocking guidance, not the
+								// approving second reviewer's notes.
+								if err == nil && len(firstReviewNotes) > 0 {
+									err = os.WriteFile(reviewNotesPath(workspace), firstReviewNotes, 0o644)
+								}
 							}
 						}
 					}
