@@ -100,11 +100,18 @@ type runningTask struct {
 	stopReason    string
 }
 
+type completedEntry struct {
+	Identifier       string
+	State            string
+	RecordedAt       time.Time
+	TrackerUpdatedAt time.Time
+}
+
 type state struct {
 	running        map[string]*runningTask
 	claimed        map[string]struct{}
 	retryQueue     map[string]domain.RetryEntry
-	completed      map[string]struct{}
+	completed      map[string]completedEntry
 	history        map[string][]domain.TimelineEvent
 	recentActivity []domain.TimelineEvent
 	totals         domain.RuntimeTotals
@@ -328,7 +335,7 @@ func (o *Orchestrator) loop(ctx context.Context) {
 		running:    map[string]*runningTask{},
 		claimed:    map[string]struct{}{},
 		retryQueue: map[string]domain.RetryEntry{},
-		completed:  map[string]struct{}{},
+		completed:  map[string]completedEntry{},
 		history:    map[string][]domain.TimelineEvent{},
 		rateLimits: map[string]domain.RateLimitSnapshot{},
 	}
@@ -585,7 +592,7 @@ func (o *Orchestrator) dispatchDueRetries(ctx context.Context, st *state) {
 		if o.cfg.IsTerminalState(issue.State) {
 			delete(st.retryQueue, issueID)
 			delete(st.claimed, issueID)
-			st.completed[issue.Identifier] = struct{}{}
+			st.completed[issue.Identifier] = newCompletedEntry(issue, now)
 			o.recordTimeline(st, issue, domain.Workspace{
 				Path:         filepath.Join(o.cfg.Workspace.Root, domain.SanitizeWorkspaceKey(issue.Identifier)),
 				WorkspaceKey: domain.SanitizeWorkspaceKey(issue.Identifier),
@@ -631,6 +638,13 @@ func (o *Orchestrator) shouldDispatch(issue domain.Issue, st *state) bool {
 func (o *Orchestrator) dispatchSkipReason(issue domain.Issue, st *state) string {
 	if issue.ID == "" || issue.Identifier == "" {
 		return "missing_identity"
+	}
+	if completed, ok := st.completed[issue.Identifier]; ok {
+		if shouldRedispatchCompletedIssue(issue, completed) {
+			delete(st.completed, issue.Identifier)
+		} else {
+			return "already_completed"
+		}
 	}
 	if !o.cfg.IsActiveState(issue.State) || o.cfg.IsTerminalState(issue.State) {
 		return "inactive_or_terminal_state"
@@ -1356,7 +1370,7 @@ func (o *Orchestrator) applyWorkerExit(ctx context.Context, st *state, exit work
 
 	switch {
 	case exit.Err == nil && exit.Refreshed != nil && o.cfg.IsTerminalState(exit.Refreshed.State):
-		st.completed[exit.Refreshed.Identifier] = struct{}{}
+		st.completed[exit.Refreshed.Identifier] = newCompletedEntry(*exit.Refreshed, time.Now().UTC())
 		delete(st.claimed, exit.Issue.ID)
 		o.recordTimeline(st, *exit.Refreshed, exit.Workspace, domain.TimelineEvent{
 			At:             time.Now().UTC(),
@@ -1404,7 +1418,7 @@ func (o *Orchestrator) applyWorkerExit(ctx context.Context, st *state, exit work
 			slog.Int("attempt", exit.Attempt),
 		)
 	case exit.Err == nil && exit.Refreshed != nil && !o.cfg.IsActiveState(exit.Refreshed.State):
-		st.completed[exit.Refreshed.Identifier] = struct{}{}
+		st.completed[exit.Refreshed.Identifier] = newCompletedEntry(*exit.Refreshed, time.Now().UTC())
 		delete(st.claimed, exit.Issue.ID)
 		o.recordTimeline(st, *exit.Refreshed, exit.Workspace, domain.TimelineEvent{
 			At:             time.Now().UTC(),
@@ -1429,7 +1443,7 @@ func (o *Orchestrator) applyWorkerExit(ctx context.Context, st *state, exit work
 			slog.Int("attempt", exit.Attempt),
 		)
 	case entry.stopReason == "terminal_state":
-		st.completed[entry.issue.Identifier] = struct{}{}
+		st.completed[entry.issue.Identifier] = newCompletedEntry(entry.issue, time.Now().UTC())
 		delete(st.claimed, exit.Issue.ID)
 		o.recordTimeline(st, entry.issue, exit.Workspace, domain.TimelineEvent{
 			At:           time.Now().UTC(),
@@ -1657,6 +1671,29 @@ func (o *Orchestrator) publishSnapshot(st *state) {
 		Completed:      completed,
 	})
 	o.history.Store(cloneHistoryMap(st.history))
+}
+
+func newCompletedEntry(issue domain.Issue, now time.Time) completedEntry {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return completedEntry{
+		Identifier:       issue.Identifier,
+		State:            issue.State,
+		RecordedAt:       now,
+		TrackerUpdatedAt: issue.UpdatedAt,
+	}
+}
+
+func shouldRedispatchCompletedIssue(issue domain.Issue, completed completedEntry) bool {
+	if issue.UpdatedAt.IsZero() {
+		return false
+	}
+	cutoff := completed.RecordedAt
+	if completed.TrackerUpdatedAt.After(cutoff) {
+		cutoff = completed.TrackerUpdatedAt
+	}
+	return issue.UpdatedAt.After(cutoff)
 }
 
 func (o *Orchestrator) recordTimeline(st *state, issue domain.Issue, workspace domain.Workspace, event domain.TimelineEvent) {

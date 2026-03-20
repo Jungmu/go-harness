@@ -64,6 +64,7 @@ The current Go harness implements:
   - transitions successful runs to `Done` unless the run explicitly stops for retry or external state change
   - runs an optional review lane that keeps issues in `In Review` until a structured verdict moves them to `Done` or `Todo`
   - reconciles terminal/non-active issues
+  - suppresses stale active-state redispatch for recently completed or handed-off issues until tracker `updated_at` advances
   - releases claims when tracker refresh no longer returns a running or retrying issue
   - refreshes the issue between turns to decide continuation vs stop
   - transitions issues to `In Review` when one live run exhausts `agent.max_turns`

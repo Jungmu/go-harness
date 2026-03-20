@@ -265,7 +265,7 @@ func TestApplyWorkerExitPrefersSuccessfulHandoffOverNonActiveStopReason(t *testi
 		},
 		claimed:    map[string]struct{}{issue.ID: {}},
 		retryQueue: map[string]domain.RetryEntry{},
-		completed:  map[string]struct{}{},
+		completed:  map[string]completedEntry{},
 		history:    map[string][]domain.TimelineEvent{},
 		rateLimits: map[string]domain.RateLimitSnapshot{},
 	}
@@ -293,6 +293,72 @@ func TestApplyWorkerExitPrefersSuccessfulHandoffOverNonActiveStopReason(t *testi
 	}
 	if !containsTimelineEvent(st.recentActivity, handoff.Identifier, "issue_completed") {
 		t.Fatalf("recent activity missing issue_completed: %#v", st.recentActivity)
+	}
+}
+
+func TestDispatchSkipReasonSkipsStaleActiveCandidateAfterCompletion(t *testing.T) {
+	cfg := loadTestConfig(t)
+	orch := newTestOrchestrator(cfg, &fakeTracker{}, &fakeWorkspaceManager{root: cfg.Workspace.Root}, &fakeRunner{})
+	completedAt := time.Date(2026, 3, 20, 6, 36, 12, 0, time.UTC)
+	st := &state{
+		running:    map[string]*runningTask{},
+		claimed:    map[string]struct{}{},
+		retryQueue: map[string]domain.RetryEntry{},
+		completed: map[string]completedEntry{
+			"JON-70": newCompletedEntry(domain.Issue{
+				Identifier: "JON-70",
+				State:      "Done",
+				UpdatedAt:  completedAt,
+			}, completedAt),
+		},
+		history:    map[string][]domain.TimelineEvent{},
+		rateLimits: map[string]domain.RateLimitSnapshot{},
+	}
+
+	issue := domain.Issue{
+		ID:         "1",
+		Identifier: "JON-70",
+		State:      "In Progress",
+		UpdatedAt:  completedAt,
+	}
+	if reason := orch.dispatchSkipReason(issue, st); reason != "already_completed" {
+		t.Fatalf("dispatchSkipReason() = %q, want already_completed", reason)
+	}
+	if _, ok := st.completed["JON-70"]; !ok {
+		t.Fatal("completed entry unexpectedly removed")
+	}
+}
+
+func TestDispatchSkipReasonAllowsRedispatchAfterNewerTrackerUpdate(t *testing.T) {
+	cfg := loadTestConfig(t)
+	orch := newTestOrchestrator(cfg, &fakeTracker{}, &fakeWorkspaceManager{root: cfg.Workspace.Root}, &fakeRunner{})
+	completedAt := time.Date(2026, 3, 20, 6, 36, 12, 0, time.UTC)
+	st := &state{
+		running:    map[string]*runningTask{},
+		claimed:    map[string]struct{}{},
+		retryQueue: map[string]domain.RetryEntry{},
+		completed: map[string]completedEntry{
+			"JON-70": newCompletedEntry(domain.Issue{
+				Identifier: "JON-70",
+				State:      "Done",
+				UpdatedAt:  completedAt,
+			}, completedAt),
+		},
+		history:    map[string][]domain.TimelineEvent{},
+		rateLimits: map[string]domain.RateLimitSnapshot{},
+	}
+
+	issue := domain.Issue{
+		ID:         "1",
+		Identifier: "JON-70",
+		State:      "In Progress",
+		UpdatedAt:  completedAt.Add(2 * time.Minute),
+	}
+	if reason := orch.dispatchSkipReason(issue, st); reason != "" {
+		t.Fatalf("dispatchSkipReason() = %q, want empty", reason)
+	}
+	if _, ok := st.completed["JON-70"]; ok {
+		t.Fatal("completed entry still present after newer tracker update")
 	}
 }
 
@@ -1101,7 +1167,7 @@ func TestDispatchDueRetriesReleasesMissingIssue(t *testing.T) {
 				LastError:  "boom",
 			},
 		},
-		completed:  map[string]struct{}{},
+		completed:  map[string]completedEntry{},
 		history:    map[string][]domain.TimelineEvent{},
 		rateLimits: map[string]domain.RateLimitSnapshot{},
 	}
@@ -1168,7 +1234,9 @@ func TestIssueSnapshotReturnsPerIssueHistoryBeyondRecentActivityLimit(t *testing
 		running:    map[string]*runningTask{},
 		claimed:    map[string]struct{}{},
 		retryQueue: map[string]domain.RetryEntry{},
-		completed:  map[string]struct{}{"ABC-1": {}},
+		completed: map[string]completedEntry{
+			"ABC-1": newCompletedEntry(domain.Issue{Identifier: "ABC-1"}, time.Date(2026, 3, 18, 9, 0, 0, 0, time.UTC)),
+		},
 		history: map[string][]domain.TimelineEvent{
 			"ABC-1": history,
 		},
