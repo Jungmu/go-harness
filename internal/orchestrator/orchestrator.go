@@ -857,12 +857,12 @@ func (o *Orchestrator) executeAttempt(ctx context.Context, issue domain.Issue, a
 		o.pushEvent(workerEvent{IssueID: runIssue.ID, Event: event})
 	}, continueFn)
 
-	// In review mode, require consensus: if the first agent approved, run a second
-	// agent and only move to done if both agree. The second verdict file is left in
-	// place for completeIssueIfNeeded to consume via the normal loadReviewVerdict path.
+	// In review mode, require consensus: both agents must review and both must approve
+	// before the issue moves to done. The second verdict file is left in place for
+	// completeIssueIfNeeded to consume via the normal loadReviewVerdict path.
 	if err == nil && o.reviewMode {
-		if firstVerdict, peekErr := peekReviewVerdict(workspace); peekErr == nil && firstVerdict.Decision == reviewDecisionDone &&
-			validateReviewVerdict(firstVerdict) == nil && validateReviewNotes(workspace) == nil {
+		firstVerdict, peekErr := peekReviewVerdict(workspace)
+		if peekErr == nil && validateReviewVerdict(firstVerdict) == nil && validateReviewNotes(workspace) == nil {
 			o.pushEvent(timelineUpdate{
 				IssueID:    runIssue.ID,
 				Identifier: runIssue.Identifier,
@@ -876,7 +876,7 @@ func (o *Orchestrator) executeAttempt(ctx context.Context, issue domain.Issue, a
 					Status:       "running",
 					WorkspaceKey: workspace.WorkspaceKey,
 					Workspace:    workspace.Path,
-					Message:      "first review agent approved; starting second review agent for consensus",
+					Message:      "first review agent completed; starting second review agent for consensus",
 				},
 			})
 			if prepErr := prepareReviewArtifacts(workspace); prepErr != nil {
@@ -889,6 +889,14 @@ func (o *Orchestrator) executeAttempt(ctx context.Context, issue domain.Issue, a
 					err = err2
 				} else {
 					result = result2
+					// Enforce consensus: if the first agent rejected, the final verdict
+					// must remain "todo" even if the second agent approved.
+					if firstVerdict.Decision == reviewDecisionTodo {
+						if secondVerdict, peekErr2 := peekReviewVerdict(workspace); peekErr2 == nil &&
+							secondVerdict.Decision == reviewDecisionDone {
+							err = writeConsensusFailureVerdict(workspace, firstVerdict)
+						}
+					}
 				}
 			}
 		}

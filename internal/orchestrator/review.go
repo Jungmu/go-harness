@@ -129,6 +129,21 @@ func validateReviewNotes(workspace domain.Workspace) error {
 	return nil
 }
 
+// writeConsensusFailureVerdict writes a "todo" verdict synthesized from the
+// first agent's blocking issues when the two review agents disagree.
+func writeConsensusFailureVerdict(workspace domain.Workspace, firstVerdict reviewVerdict) error {
+	verdict := reviewVerdict{
+		Decision:       reviewDecisionTodo,
+		Summary:        "review agents did not reach consensus: first agent rejected, second agent approved",
+		BlockingIssues: firstVerdict.BlockingIssues,
+	}
+	raw, err := json.Marshal(verdict)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(reviewResultPath(workspace), raw, 0o644)
+}
+
 func appendCodingReviewNotesGuidance(prompt string, workspace domain.Workspace) string {
 	if _, err := os.Stat(reviewNotesPath(workspace)); err != nil {
 		return prompt
