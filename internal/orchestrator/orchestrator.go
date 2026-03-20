@@ -857,6 +857,42 @@ func (o *Orchestrator) executeAttempt(ctx context.Context, issue domain.Issue, a
 		o.pushEvent(workerEvent{IssueID: runIssue.ID, Event: event})
 	}, continueFn)
 
+	// In review mode, require consensus: if the first agent approved, run a second
+	// agent and only move to done if both agree. The second verdict file is left in
+	// place for completeIssueIfNeeded to consume via the normal loadReviewVerdict path.
+	if err == nil && o.reviewMode {
+		if firstVerdict, peekErr := peekReviewVerdict(workspace); peekErr == nil && firstVerdict.Decision == reviewDecisionDone {
+			o.pushEvent(timelineUpdate{
+				IssueID:    runIssue.ID,
+				Identifier: runIssue.Identifier,
+				Workspace:  workspace,
+				Event: domain.TimelineEvent{
+					At:           time.Now().UTC(),
+					IssueID:      runIssue.ID,
+					Identifier:   runIssue.Identifier,
+					Attempt:      attempt,
+					Event:        "review_second_pass_started",
+					Status:       "running",
+					WorkspaceKey: workspace.WorkspaceKey,
+					Workspace:    workspace.Path,
+					Message:      "first review agent approved; starting second review agent for consensus",
+				},
+			})
+			if prepErr := prepareReviewArtifacts(workspace); prepErr != nil {
+				err = prepErr
+			} else {
+				result2, err2 := o.runner.RunAttempt(ctx, runIssue, workspace, prompt, attempt, func(event agent.Event) {
+					o.pushEvent(workerEvent{IssueID: runIssue.ID, Event: event})
+				}, nil)
+				if err2 != nil {
+					err = err2
+				} else {
+					result = result2
+				}
+			}
+		}
+	}
+
 	afterRunErr := o.workspaces.AfterRun(context.Background(), workspace)
 	if err == nil && afterRunErr != nil {
 		o.pushEvent(timelineUpdate{
