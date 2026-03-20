@@ -421,13 +421,14 @@ claim이 해제되었고 다시 poll 결과에 따라 재판단된다.
 
 1. review lane은 `REVIEW-WORKFLOW.md`가 있을 때만 활성화된다.
 2. review lane은 `tracker.active_states = ["In Review"]` candidate만 조회한다.
-3. review lane은 workspace를 준비한 뒤 stale `.harness/review-result.json`을 지운다.
+3. review lane은 workspace를 준비한 뒤 stale `.harness/review-result.json`과 `.harness/review-notes.md`를 지운다.
 4. review lane은 `REVIEW-WORKFLOW.md` body를 렌더링하고 internal review contract suffix를 덧붙인다.
-5. review lane은 continuation 없이 정확히 한 turn만 실행한다.
+5. review lane은 continuation 없이 정확히 한 turn만 실행한다 (two-pass consensus의 각 pass 모두 동일).
 6. review turn이 성공하면 `.harness/review-result.json`과 `.harness/review-notes.md`를 검증한다.
-7. verdict가 `done`이면 workspace branch를 push하고 GitHub PR을 생성 또는 재사용한 뒤 issue를 `Done`으로 전환하고 workspace를 정리한다.
-8. verdict가 `todo`이면 issue를 `Todo`로 전환하고 claim만 해제한다. workspace는 유지한다.
-9. review artifact가 없거나 invalid면 attempt failure로 처리하고 normal retry policy를 적용한다.
+7. 첫 번째 review turn이 검증을 통과하면 (verdict와 무관하게), stale artifacts를 지운 뒤 두 번째 review agent를 실행한다 (two-pass consensus).
+8. 두 번째 agent의 verdict도 `done`이면 workspace branch를 push하고 GitHub PR을 생성 또는 재사용한 뒤 issue를 `Done`으로 전환하고 workspace를 정리한다.
+9. 어느 한 agent라도 verdict가 `todo`이면 issue를 `Todo`로 전환하고 claim만 해제한다. workspace는 유지한다.
+10. review artifact가 없거나 invalid면 attempt failure로 처리하고 normal retry policy를 적용한다.
 
 ### 11.4 continuation 규칙
 

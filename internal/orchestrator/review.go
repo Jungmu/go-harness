@@ -37,11 +37,28 @@ func prepareReviewArtifacts(workspace domain.Workspace) error {
 	if err := os.MkdirAll(reviewArtifactsDir(workspace), 0o755); err != nil {
 		return err
 	}
-	err := os.Remove(reviewResultPath(workspace))
-	if err == nil || os.IsNotExist(err) {
-		return nil
+	for _, path := range []string{reviewResultPath(workspace), reviewNotesPath(workspace)} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
-	return err
+	return nil
+}
+
+// peekReviewVerdict reads the current verdict file without deleting it.
+// Use loadReviewVerdict when you want to consume the verdict.
+func peekReviewVerdict(workspace domain.Workspace) (reviewVerdict, error) {
+	path := reviewResultPath(workspace)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return reviewVerdict{}, err
+	}
+	var verdict reviewVerdict
+	if err := json.Unmarshal(raw, &verdict); err != nil {
+		return reviewVerdict{}, fmt.Errorf("parse review verdict: %w", err)
+	}
+	verdict.Decision = strings.ToLower(strings.TrimSpace(verdict.Decision))
+	return verdict, nil
 }
 
 func loadReviewVerdict(workspace domain.Workspace) (reviewVerdict, error) {
@@ -110,6 +127,21 @@ func validateReviewNotes(workspace domain.Workspace) error {
 		return fmt.Errorf("review notes must not be empty")
 	}
 	return nil
+}
+
+// writeConsensusFailureVerdict writes a "todo" verdict synthesized from the
+// first agent's blocking issues when the two review agents disagree.
+func writeConsensusFailureVerdict(workspace domain.Workspace, firstVerdict reviewVerdict) error {
+	verdict := reviewVerdict{
+		Decision:       reviewDecisionTodo,
+		Summary:        "review agents did not reach consensus: first agent rejected, second agent approved",
+		BlockingIssues: firstVerdict.BlockingIssues,
+	}
+	raw, err := json.Marshal(verdict)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(reviewResultPath(workspace), raw, 0o644)
 }
 
 func appendCodingReviewNotesGuidance(prompt string, workspace domain.Workspace) string {

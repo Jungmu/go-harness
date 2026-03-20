@@ -502,8 +502,10 @@ func TestReviewOrchestratorMovesIssueToDoneFromVerdict(t *testing.T) {
 		},
 	}
 	workspaceManager := &fakeWorkspaceManager{root: cfg.Workspace.Root}
+	var runCount atomic.Int32
 	runner := &fakeRunner{
 		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error) {
+			runCount.Add(1)
 			if continueFn != nil {
 				t.Fatal("review run should not use continuation")
 			}
@@ -546,6 +548,9 @@ func TestReviewOrchestratorMovesIssueToDoneFromVerdict(t *testing.T) {
 
 	waitFor(t, func() bool { return atomic.LoadInt32(&workspaceManager.cleanupCalls) > 0 })
 
+	if count := runCount.Load(); count != 2 {
+		t.Fatalf("runner called %d times, want 2 (both review agents must run when both approve)", count)
+	}
 	snapshot := orch.Snapshot()
 	if len(snapshot.Completed) != 1 || snapshot.Completed[0] != "ABC-1" {
 		t.Fatalf("completed = %#v, want [ABC-1]", snapshot.Completed)
@@ -553,8 +558,274 @@ func TestReviewOrchestratorMovesIssueToDoneFromVerdict(t *testing.T) {
 	if !containsTimelineEvent(snapshot.RecentActivity, "ABC-1", "issue_completed") {
 		t.Fatalf("recent activity missing issue_completed: %#v", snapshot.RecentActivity)
 	}
+	if !containsTimelineEvent(snapshot.RecentActivity, "ABC-1", "review_second_pass_started") {
+		t.Fatalf("recent activity missing review_second_pass_started: %#v", snapshot.RecentActivity)
+	}
 	if len(transitions) != 1 || transitions[0] != "Done" {
 		t.Fatalf("transitions = %#v, want [Done]", transitions)
+	}
+}
+
+func TestReviewOrchestratorRequiresConsensusForDone(t *testing.T) {
+	cfg := loadReviewTestConfig(t)
+	issue := domain.Issue{ID: "1", Identifier: "ABC-1", Title: "Example", State: "In Review"}
+
+	var transitions []string
+	tracker := &fakeTracker{
+		pollCandidates: func() []domain.Issue { return []domain.Issue{issue} },
+		fetchByIDs:     func(_ []string) []domain.Issue { return []domain.Issue{issue} },
+		transitionState: func(issue domain.Issue, stateName string) (domain.Issue, error) {
+			transitions = append(transitions, stateName)
+			issue.State = stateName
+			return issue, nil
+		},
+	}
+	workspaceManager := &fakeWorkspaceManager{root: cfg.Workspace.Root}
+
+	var runCount atomic.Int32
+	runner := &fakeRunner{
+		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error) {
+			call := runCount.Add(1)
+			if err := os.MkdirAll(filepath.Dir(reviewNotesPath(workspace)), 0o755); err != nil {
+				t.Fatalf("MkdirAll() error = %v", err)
+			}
+			if err := os.WriteFile(reviewNotesPath(workspace), []byte("See blocking issues."), 0o644); err != nil {
+				t.Fatalf("WriteFile(notes) error = %v", err)
+			}
+			var verdict reviewVerdict
+			if call == 1 {
+				// First agent approves
+				verdict = reviewVerdict{Decision: reviewDecisionDone, Summary: "Looks good", BlockingIssues: []reviewBlockingIssue{}}
+			} else {
+				// Second agent rejects
+				verdict = reviewVerdict{
+					Decision: reviewDecisionTodo,
+					Summary:  "Found a problem",
+					BlockingIssues: []reviewBlockingIssue{{
+						Title:  "Missing test",
+						Reason: "No coverage for edge case",
+						File:   "internal/orchestrator/orchestrator.go",
+					}},
+				}
+			}
+			raw, err := json.Marshal(verdict)
+			if err != nil {
+				t.Fatalf("Marshal(verdict) error = %v", err)
+			}
+			if err := os.WriteFile(reviewResultPath(workspace), raw, 0o644); err != nil {
+				t.Fatalf("WriteFile(verdict) error = %v", err)
+			}
+			return agent.RunResult{
+				Session: domain.LiveSession{SessionID: "review-thread-turn-1", ConversationID: "review-thread", TurnID: "turn-1"},
+			}, nil
+		},
+	}
+
+	orch := newTestOrchestrator(cfg, tracker, workspaceManager, runner, WithReviewMode())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := orch.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer func() {
+		_ = orch.Stop(context.Background())
+	}()
+
+	waitFor(t, func() bool {
+		snapshot := orch.Snapshot()
+		return containsTimelineReason(snapshot.RecentActivity, "ABC-1", "issue_released", reviewRejectedStopReason)
+	})
+
+	if count := runCount.Load(); count != 2 {
+		t.Fatalf("runner called %d times, want 2 (once per review agent)", count)
+	}
+	snapshot := orch.Snapshot()
+	if len(snapshot.Completed) != 0 {
+		t.Fatalf("completed = %#v, want empty (second agent rejected)", snapshot.Completed)
+	}
+	if len(transitions) != 1 || transitions[0] != "Todo" {
+		t.Fatalf("transitions = %#v, want [Todo]", transitions)
+	}
+}
+
+func TestReviewOrchestratorConsensusFailurePreservesFirstAgentNotes(t *testing.T) {
+	// Regression: when the first agent rejects and the second agent approves,
+	// writeConsensusFailureVerdict fixes the JSON verdict but the review notes
+	// must come from the first (rejecting) agent, not the second (approving) one.
+	cfg := loadReviewTestConfig(t)
+	issue := domain.Issue{ID: "1", Identifier: "ABC-1", Title: "Example", State: "In Review"}
+
+	var transitions []string
+	var capturedWorkspace domain.Workspace
+	tracker := &fakeTracker{
+		pollCandidates: func() []domain.Issue { return []domain.Issue{issue} },
+		fetchByIDs:     func(_ []string) []domain.Issue { return []domain.Issue{issue} },
+		transitionState: func(issue domain.Issue, stateName string) (domain.Issue, error) {
+			transitions = append(transitions, stateName)
+			issue.State = stateName
+			return issue, nil
+		},
+	}
+	workspaceManager := &fakeWorkspaceManager{root: cfg.Workspace.Root}
+
+	var runCount atomic.Int32
+	runner := &fakeRunner{
+		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error) {
+			call := runCount.Add(1)
+			capturedWorkspace = workspace
+			if err := os.MkdirAll(filepath.Dir(reviewNotesPath(workspace)), 0o755); err != nil {
+				t.Fatalf("MkdirAll() error = %v", err)
+			}
+			var verdict reviewVerdict
+			if call == 1 {
+				// First agent rejects
+				if err := os.WriteFile(reviewNotesPath(workspace), []byte("First agent notes: fix the nil pointer."), 0o644); err != nil {
+					t.Fatalf("WriteFile(notes) error = %v", err)
+				}
+				verdict = reviewVerdict{
+					Decision: reviewDecisionTodo,
+					Summary:  "Blocking issue found",
+					BlockingIssues: []reviewBlockingIssue{{
+						Title:  "Nil pointer",
+						Reason: "Result can be nil",
+						File:   "internal/orchestrator/orchestrator.go",
+					}},
+				}
+			} else {
+				// Second agent approves
+				if err := os.WriteFile(reviewNotesPath(workspace), []byte("Second agent notes: looks great, no issues."), 0o644); err != nil {
+					t.Fatalf("WriteFile(notes) error = %v", err)
+				}
+				verdict = reviewVerdict{Decision: reviewDecisionDone, Summary: "Looks good", BlockingIssues: []reviewBlockingIssue{}}
+			}
+			raw, err := json.Marshal(verdict)
+			if err != nil {
+				t.Fatalf("Marshal(verdict) error = %v", err)
+			}
+			if err := os.WriteFile(reviewResultPath(workspace), raw, 0o644); err != nil {
+				t.Fatalf("WriteFile(verdict) error = %v", err)
+			}
+			return agent.RunResult{
+				Session: domain.LiveSession{SessionID: "review-thread-turn-1", ConversationID: "review-thread", TurnID: "turn-1"},
+			}, nil
+		},
+	}
+
+	orch := newTestOrchestrator(cfg, tracker, workspaceManager, runner, WithReviewMode())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := orch.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer func() {
+		_ = orch.Stop(context.Background())
+	}()
+
+	waitFor(t, func() bool {
+		snapshot := orch.Snapshot()
+		return containsTimelineReason(snapshot.RecentActivity, "ABC-1", "issue_released", reviewRejectedStopReason)
+	})
+
+	if count := runCount.Load(); count != 2 {
+		t.Fatalf("runner called %d times, want 2", count)
+	}
+	if len(transitions) != 1 || transitions[0] != "Todo" {
+		t.Fatalf("transitions = %#v, want [Todo]", transitions)
+	}
+
+	// The review notes on disk must come from the first (rejecting) agent.
+	notesBytes, err := os.ReadFile(reviewNotesPath(capturedWorkspace))
+	if err != nil {
+		t.Fatalf("ReadFile(review notes) error = %v", err)
+	}
+	notes := string(notesBytes)
+	if !strings.Contains(notes, "First agent notes") {
+		t.Fatalf("review notes = %q, want first agent's notes to be preserved", notes)
+	}
+	if strings.Contains(notes, "Second agent notes") {
+		t.Fatalf("review notes = %q, must not contain second agent's approving notes", notes)
+	}
+}
+
+func TestReviewOrchestratorSecondPassInvalidDoneIsHardFailure(t *testing.T) {
+	// When the first agent rejects and the second agent returns a decodable but
+	// invalid "done" verdict (e.g. empty summary), the attempt must fail hard
+	// (enter retrying state) rather than silently converting to a consensus todo.
+	cfg := loadReviewTestConfig(t)
+	issue := domain.Issue{ID: "1", Identifier: "ABC-1", Title: "Example", State: "In Review"}
+
+	tracker := &fakeTracker{
+		pollCandidates: func() []domain.Issue { return []domain.Issue{issue} },
+		fetchByIDs:     func(_ []string) []domain.Issue { return []domain.Issue{issue} },
+		transitionState: func(issue domain.Issue, stateName string) (domain.Issue, error) {
+			issue.State = stateName
+			return issue, nil
+		},
+	}
+	workspaceManager := &fakeWorkspaceManager{root: cfg.Workspace.Root}
+
+	var runCount atomic.Int32
+	runner := &fakeRunner{
+		run: func(ctx context.Context, issue domain.Issue, workspace domain.Workspace, prompt string, attempt int, onEvent func(agent.Event), continueFn agent.ContinueFunc) (agent.RunResult, error) {
+			call := runCount.Add(1)
+			if err := os.MkdirAll(filepath.Dir(reviewNotesPath(workspace)), 0o755); err != nil {
+				t.Fatalf("MkdirAll() error = %v", err)
+			}
+			var verdict reviewVerdict
+			if call == 1 {
+				// First agent rejects with a valid todo verdict.
+				if err := os.WriteFile(reviewNotesPath(workspace), []byte("First agent notes: blocking issue found."), 0o644); err != nil {
+					t.Fatalf("WriteFile(notes) error = %v", err)
+				}
+				verdict = reviewVerdict{
+					Decision: reviewDecisionTodo,
+					Summary:  "Blocking issue found",
+					BlockingIssues: []reviewBlockingIssue{{
+						Title:  "Nil pointer",
+						Reason: "Result can be nil",
+						File:   "internal/orchestrator/orchestrator.go",
+					}},
+				}
+			} else {
+				// Second agent returns a "done" verdict with an empty summary —
+				// invalid per the review contract.
+				if err := os.WriteFile(reviewNotesPath(workspace), []byte("Second agent notes."), 0o644); err != nil {
+					t.Fatalf("WriteFile(notes) error = %v", err)
+				}
+				verdict = reviewVerdict{Decision: reviewDecisionDone, Summary: "", BlockingIssues: []reviewBlockingIssue{}}
+			}
+			raw, err := json.Marshal(verdict)
+			if err != nil {
+				t.Fatalf("Marshal(verdict) error = %v", err)
+			}
+			if err := os.WriteFile(reviewResultPath(workspace), raw, 0o644); err != nil {
+				t.Fatalf("WriteFile(verdict) error = %v", err)
+			}
+			return agent.RunResult{
+				Session: domain.LiveSession{SessionID: "review-thread-turn-1", ConversationID: "review-thread", TurnID: "turn-1"},
+			}, nil
+		},
+	}
+
+	orch := newTestOrchestrator(cfg, tracker, workspaceManager, runner, WithReviewMode())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := orch.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer func() {
+		_ = orch.Stop(context.Background())
+	}()
+
+	// The attempt must fail and enter the retry queue, not transition to Todo.
+	waitFor(t, func() bool { return orch.Snapshot().Counts.Retrying == 1 })
+
+	snapshot := orch.Snapshot()
+	if snapshot.Retrying[0].Identifier != "ABC-1" {
+		t.Fatalf("retrying = %#v", snapshot.Retrying)
+	}
+	if !containsTimelineEvent(snapshot.RecentActivity, "ABC-1", "attempt_failed") {
+		t.Fatalf("recent activity missing attempt_failed: %#v", snapshot.RecentActivity)
 	}
 }
 

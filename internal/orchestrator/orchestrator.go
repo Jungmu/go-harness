@@ -857,6 +857,70 @@ func (o *Orchestrator) executeAttempt(ctx context.Context, issue domain.Issue, a
 		o.pushEvent(workerEvent{IssueID: runIssue.ID, Event: event})
 	}, continueFn)
 
+	// In review mode, require consensus: both agents must review and both must approve
+	// before the issue moves to done. The second verdict file is left in place for
+	// completeIssueIfNeeded to consume via the normal loadReviewVerdict path.
+	if err == nil && o.reviewMode {
+		firstVerdict, peekErr := peekReviewVerdict(workspace)
+		if peekErr == nil && validateReviewVerdict(firstVerdict) == nil && validateReviewNotes(workspace) == nil {
+			o.pushEvent(timelineUpdate{
+				IssueID:    runIssue.ID,
+				Identifier: runIssue.Identifier,
+				Workspace:  workspace,
+				Event: domain.TimelineEvent{
+					At:           time.Now().UTC(),
+					IssueID:      runIssue.ID,
+					Identifier:   runIssue.Identifier,
+					Attempt:      attempt,
+					Event:        "review_second_pass_started",
+					Status:       "running",
+					WorkspaceKey: workspace.WorkspaceKey,
+					Workspace:    workspace.Path,
+					Message:      "first review agent completed; starting second review agent for consensus",
+				},
+			})
+			// Save first agent's review notes before clearing artifacts so we
+			// can restore them if the agents disagree (first rejected, second approved).
+			firstReviewNotes, _ := os.ReadFile(reviewNotesPath(workspace))
+
+			if prepErr := prepareReviewArtifacts(workspace); prepErr != nil {
+				err = prepErr
+			} else {
+				result2, err2 := o.runner.RunAttempt(ctx, runIssue, workspace, prompt, attempt, func(event agent.Event) {
+					o.pushEvent(workerEvent{IssueID: runIssue.ID, Event: event})
+				}, nil)
+				if err2 != nil {
+					err = err2
+				} else {
+					result = result2
+					// Enforce consensus: if the first agent rejected, the final verdict
+					// must remain "todo" even if the second agent approved.
+					if firstVerdict.Decision == reviewDecisionTodo {
+						secondVerdict, peekErr2 := peekReviewVerdict(workspace)
+						if peekErr2 == nil && secondVerdict.Decision == reviewDecisionDone {
+							// Full validation of the second agent's done verdict before
+							// treating it as a consensus failure. An invalid done payload
+							// is a hard failure, not a silent consensus override.
+							if valErr := validateReviewVerdict(secondVerdict); valErr != nil {
+								err = fmt.Errorf("second review agent produced invalid done verdict: %w", valErr)
+							} else if valErr := validateReviewNotes(workspace); valErr != nil {
+								err = fmt.Errorf("second review agent produced invalid done verdict: %w", valErr)
+							} else {
+								err = writeConsensusFailureVerdict(workspace, firstVerdict)
+								// Restore the first agent's notes so follow-up runs get
+								// the rejecting reviewer's blocking guidance, not the
+								// approving second reviewer's notes.
+								if err == nil && len(firstReviewNotes) > 0 {
+									err = os.WriteFile(reviewNotesPath(workspace), firstReviewNotes, 0o644)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	afterRunErr := o.workspaces.AfterRun(context.Background(), workspace)
 	if err == nil && afterRunErr != nil {
 		o.pushEvent(timelineUpdate{

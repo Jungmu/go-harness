@@ -130,13 +130,16 @@ Unknown variables and filters return `workflow_template_render_error`.
 - An invalid `REVIEW-WORKFLOW.md` blocks daemon startup if the file exists.
 - Review reloads still have their own file validation, but inherited main-workflow config changes also trigger a review effective-config reload. An invalid review reload blocks only review dispatch.
 - Review prompts are rendered from the `REVIEW-WORKFLOW.md` body template and then extended with an internal review contract suffix.
-- Review turns do not use continuation. Each review attempt runs exactly one turn.
+- Review turns do not use continuation. Each review attempt runs exactly two turns: a first agent and a second agent that independently review the workspace.
+- The issue moves to `Done` only when both agents agree (`decision="done"`). If either agent rejects, the issue returns to `Todo`.
 
 ## Review Result Contract
 
-- A successful review turn must write `.harness/review-result.json` and `.harness/review-notes.md` inside the issue workspace.
-- Before a review turn starts, the runtime removes any stale `.harness/review-result.json`.
-- On successful verdict parsing, the runtime deletes `.harness/review-result.json` and keeps `.harness/review-notes.md`.
+- Each review agent must write `.harness/review-result.json` and `.harness/review-notes.md` inside the issue workspace.
+- Before each agent turn starts, the runtime removes any stale `.harness/review-result.json` and `.harness/review-notes.md`.
+- After the first agent completes, the runtime validates its verdict and then clears the artifact files before starting the second agent.
+- A `decision="done"` outcome requires both agents to independently approve. If the agents disagree, the runtime synthesizes a `decision="todo"` verdict from the rejecting agent's blocking issues.
+- On final verdict parsing, the runtime deletes `.harness/review-result.json` and keeps `.harness/review-notes.md`.
 - `review-result.json` must decode to:
   - `decision`: `"done"` or `"todo"`
   - `summary`: non-empty string
